@@ -104,7 +104,8 @@ std::string runtimeStatusJson(
       << ",\"runtime_cache_namespace\":"
       << json::quote(cacheIdentity.namespaceSha256)
       << ",\"build_id\":" << json::quote(cacheIdentity.buildId)
-      << ",\"dtype\":" << json::quote(kQ8FormatName)
+      << ",\"dtype\":"
+      << json::quote(cacheIdentity.tq4Kv ? kTQ4FormatName : kQ8FormatName)
       << ",\"block_tokens\":" << kv::kPageTokens
       << "},\"q8\":{\"target_model_sha256\":"
       << json::quote(digestHex(cacheIdentity.q8Layout.modelArtifactSha256))
@@ -200,6 +201,12 @@ std::string runtimeStatusJson(
       << ",\"avoided_rows\":" << executorTelemetry.draftContextRowsAvoided
       << ",\"restore_skipped\":" << executorTelemetry.draftStateRestoreSkipped
       << ",\"resets\":" << executorTelemetry.draftStateResets << "}"
+      << ",\"phase_residency\":{\"draft_weights_resident\":"
+      << (executorTelemetry.draftWeightsResident ? "true" : "false")
+      << ",\"draft_weight_bytes\":" << executorTelemetry.draftWeightBytes
+      << ",\"draft_load_count\":" << executorTelemetry.draftLoadCount
+      << ",\"draft_unload_count\":" << executorTelemetry.draftUnloadCount
+      << "}"
       // Model-lifetime timings include warmup; request metrics do not.
       << ",\"model_timing\":{\"scope\":\"model_lifetime\""
       << ",\"prefill\":{\"last_gpu_ms\":"

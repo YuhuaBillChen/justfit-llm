@@ -2115,20 +2115,18 @@ void testLongDecodePreemptionPlansTheCurrentReplayBoundary() {
   require(resources.snapshot().stateCache.entries == 0,
           "snapshot denial left a composite state to restore");
 
-  // Retain a KV junction one draft window past the original prompt boundary.
-  // The old prompt boundary, this junction, and the generated history's end
-  // would require three capture spans if replay still used the old boundary.
-  constexpr uint32_t retainedKvTokens = 6144;
-  while (resources.snapshot().kvCache.blocks >
-         retainedKvTokens / KvCache::pageTokens) {
-    require(resources.reclaimOne(CacheReclaimMode::ReuseBacking).madeProgress,
-            "could not reclaim the suspended decode's KV tail");
-  }
+  // Without a recurrent checkpoint, target execution must replay from token
+  // zero. Keeping its KV-only prefix would make replay allocate a second copy
+  // under the same pressure that caused suspension. The prefix backing stays
+  // resident but becomes free and reusable.
+  const auto suspended = resources.snapshot();
   {
     auto lookup = resources.lookup(history);
-    require(lookup.kvBoundary == retainedKvTokens &&
-                lookup.resumeBoundary() == 0,
-            "long replay did not retain the intended stateless KV junction");
+    require(lookup.kvBoundary == 0 && lookup.resumeBoundary() == 0 &&
+                suspended.kvCache.blocks == 0 &&
+                suspended.pool.pagesFreeResident ==
+                    suspended.pool.pagesResident,
+            "suspended stateless prefix did not become reusable backing");
   }
 
   backing.growthBlocked = false;
@@ -2138,8 +2136,8 @@ void testLongDecodePreemptionPlansTheCurrentReplayBoundary() {
   now += 101;
   require(engine.tick(now++), "long replay did not resume after pressure eased");
   const auto &plan = executor.plans.at(id);
-  require(plan.replayEnd == history.size() && plan.captureSpans.size() == 2,
-          "resumed draft plan did not cover generated history in two spans");
+  require(plan.replayEnd == history.size() && plan.captureSpans.size() == 1,
+          "resumed draft plan did not rebuild the complete history once");
   const double finishBy = now + 100;
   for (; now < finishBy && !engine.idle(); ++now)
     static_cast<void>(engine.tick(now));
@@ -2160,8 +2158,10 @@ void testLongDecodePreemptionPlansTheCurrentReplayBoundary() {
           "long replay repeated output or changed original request usage");
   require(executor.requests.empty() &&
               resources.snapshot().pool.pagesActive == 0 &&
+              resources.snapshot().pool.pagesResident <=
+                  suspended.pool.pagesResident + 4 &&
               resources.snapshot().activeRequests == 0,
-          "long replay leaked active resources");
+          "long replay leaked or duplicated resident backing");
 }
 
 void testPreemptedDecodeRestoresItsResidentCompositeState() {

@@ -147,6 +147,9 @@ struct ComputeDispatch {
   std::vector<BytesBinding> bytes;
   DispatchSize threadgroups;
   DispatchSize threadsPerThreadgroup;
+  // Insert a buffer-scope fence before this dispatch when a command graph
+  // deliberately reuses writable scratch across adjacent kernels.
+  bool barrierBefore = false;
 };
 
 struct CommandTiming {

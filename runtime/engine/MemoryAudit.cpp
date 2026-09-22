@@ -45,7 +45,8 @@ MemoryAuditResult auditActualMemory(const EngineMemoryPlan &plan,
                                     ActualMemoryReport actual) {
   const EngineMemoryBreakdown &budget = plan.breakdown();
   if (!actual.targetWeightsBytes || !actual.draftWeightsBytes ||
-      !actual.visionWeightsBytes || !actual.stateResidentBytes ||
+      (budget.visionWeightsBytes && !actual.visionWeightsBytes) ||
+      !actual.stateResidentBytes ||
       !actual.sharedPrefillBytes || !actual.sharedDecodeBytes ||
       !actual.kvResidentBytes || !actual.backendAllocatedBytes ||
       !actual.deviceCurrentAllocatedBytes || !actual.devicePeakAllocatedBytes ||

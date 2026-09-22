@@ -1826,6 +1826,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--max-context", type=_parse_max_context, default=None)
     parser.add_argument("--max-memory", type=_parse_max_memory, default=None)
+    parser.add_argument("--host-reserve", type=_parse_max_memory, default=None)
     parser.add_argument(
         "--max-request-size",
         type=_parse_request_size,
@@ -1873,6 +1874,9 @@ def _native_command(args):
         args.draft,
         "auto" if args.max_context is None else str(args.max_context),
         "auto" if args.max_memory is None else str(args.max_memory),
+        "auto"
+        if getattr(args, "host_reserve", None) is None
+        else str(args.host_reserve),
     ]
     return command
 

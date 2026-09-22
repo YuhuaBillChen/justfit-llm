@@ -70,10 +70,12 @@ std::optional<std::string> ModelMemoryProfile::validationError() const {
       maximumContextTokens > kv::kMaximumLogicalTokens) {
     return "invalid_model_context_length";
   }
-  if (!targetKvLayout.valid()) return "invalid_target_kv_layout";
+  if (!targetKvLayout.valid() || (tq4Kv && !tq4Layout().valid()))
+    return "invalid_target_kv_layout";
   if (!footprint.targetWeightsBytes) return "target_weight_bytes_required";
   if (!footprint.draftWeightsBytes) return "draft_weight_bytes_required";
-  if (!footprint.visionWeightsBytes) return "vision_weight_bytes_required";
+  if (!footprint.visionWeightsBytes && !footprint.phaseManagedVision)
+    return "vision_weight_bytes_required";
   if (!footprint.activeStateCellBytes) {
     return "active_state_cell_bytes_required";
   }
@@ -94,14 +96,23 @@ std::optional<std::string> ModelMemoryProfile::validationError() const {
 uint64_t ModelMemoryProfile::fixedRuntimeBytes() const {
   uint64_t result = 0;
   for (uint64_t value : {
-           footprint.targetWeightsBytes, footprint.draftWeightsBytes,
-           footprint.visionWeightsBytes, footprint.sharedPrefillBytes,
+           footprint.targetWeightsBytes, footprint.visionWeightsBytes,
            footprint.sharedDecodeBytes, footprint.pipelineReserveBytes,
            footprint.runtimeOverheadReserveBytes}) {
     if (!checkedAdd(result, value, result)) {
       throw std::overflow_error("fixed runtime cost overflow");
     }
   }
+  uint64_t phaseBytes = 0;
+  if (footprint.phaseManagedDraft) {
+    phaseBytes = std::max(footprint.draftWeightsBytes,
+                          footprint.sharedPrefillBytes);
+  } else if (!checkedAdd(footprint.draftWeightsBytes,
+                         footprint.sharedPrefillBytes, phaseBytes)) {
+    throw std::overflow_error("fixed runtime cost overflow");
+  }
+  if (!checkedAdd(result, phaseBytes, result))
+    throw std::overflow_error("fixed runtime cost overflow");
   return result;
 }
 
@@ -113,11 +124,15 @@ std::string modelStatusJson(const ModelMemoryProfile &model) {
       << "\"kv_heads\":" << model.targetKvLayout.kvHeads << ','
       << "\"head_dimension\":" << model.targetKvLayout.headDimension << ','
       << "\"kv_page_tokens\":" << kv::kPageTokens << ','
-      << "\"kv_quantization_bits\":8,"
+      << "\"kv_quantization_bits\":" << (model.tq4Kv ? 4 : 8) << ','
       << "\"kv_elements_per_scale\":"
-      << model.targetKvLayout.elementsPerScale() << ','
-      << "\"kv_scale_value_bytes\":" << sizeof(float) << ','
-      << "\"q8_page_bytes\":" << model.targetKvLayout.bytesPerModelPage()
+      << (model.tq4Kv ? model.targetKvLayout.headDimension
+                      : model.targetKvLayout.elementsPerScale()) << ','
+      << "\"kv_scale_value_bytes\":"
+      << (model.tq4Kv ? sizeof(uint16_t) : sizeof(float)) << ','
+      << "\"phase_managed_draft\":"
+      << (model.footprint.phaseManagedDraft ? "true" : "false") << ','
+      << "\"kv_page_bytes\":" << model.kvPageBytes()
       << ','
       << "\"memory\":{" << "\"target_weights_bytes\":"
       << model.footprint.targetWeightsBytes << ','
@@ -192,9 +207,9 @@ std::string EngineMemoryBreakdown::describe() const {
       << bytesAndMiB(runtimeOverheadReserveBytes) << '\n'
       << "fixed runtime: " << bytesAndMiB(fixedRuntimeBytes) << '\n'
       << "elastic state/KV budget: " << bytesAndMiB(dynamicBudgetBytes) << '\n'
-      << "Q8 KV page: " << kvPageTokens << " tokens, "
+      << "KV page: " << kvPageTokens << " tokens, "
       << bytesAndMiB(kvPageBytes) << '\n'
-      << "Q8 physical extent: " << kvExtentPages << " pages, "
+      << "KV physical extent: " << kvExtentPages << " pages, "
       << bytesAndMiB(kvExtentBytes) << '\n'
       << "KV virtual address space: " << kvVirtualPages << " pages / "
       << kvVirtualTokens << " tokens (geometry maximum " << maximumKvPages
@@ -273,8 +288,8 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
       model.footprint.runtimeOverheadReserveBytes;
   breakdown.kvPageTokens = kv::kPageTokens;
   breakdown.kvSparseMappingBatchPages =
-      model.targetKvLayout.sparseMappingBatchPages();
-  breakdown.kvExtentPages = model.targetKvLayout.backingExtentPages();
+      model.kvMappingBatchPages();
+  breakdown.kvExtentPages = model.kvExtentPages();
 
   if (auto error = device.validationError()) {
     return {std::nullopt, failure(BudgetErrorCode::InvalidDeviceCapabilities,
@@ -296,7 +311,7 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
   breakdown.hardBudgetBytes = EngineMemoryPolicy::hardBudgetBytes(
       breakdown.recommendedWorkingSetBytes, maximumMemoryBytes);
 
-  breakdown.kvPageBytes = model.targetKvLayout.bytesPerModelPage();
+  breakdown.kvPageBytes = model.kvPageBytes();
   breakdown.fixedRuntimeBytes = model.fixedRuntimeBytes();
   breakdown.dynamicBudgetBytes =
       breakdown.hardBudgetBytes > breakdown.fixedRuntimeBytes
@@ -314,8 +329,7 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
                     std::move(breakdown))};
   }
   const uint64_t largestBufferBytesPerPage =
-      std::max(model.targetKvLayout.dataBytesPerLayerPage(),
-               model.targetKvLayout.scaleBytesPerLayerPage());
+      model.kvLargestBufferBytesPerPage();
   uint64_t geometryMaximum =
       device.maxBufferLengthBytes / largestBufferBytesPerPage;
   geometryMaximum -= geometryMaximum % breakdown.kvSparseMappingBatchPages;

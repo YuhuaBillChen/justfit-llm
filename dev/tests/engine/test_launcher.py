@@ -68,13 +68,17 @@ class LauncherTests(unittest.TestCase):
                 MODEL_ID,
                 "--max-memory",
                 "28G",
+                "--host-reserve",
+                "512M",
                 "--max-context",
                 "100K",
             ]
         )
         self.assertEqual(args.model, MODEL_ID)
         self.assertEqual(args.max_memory, 28 * 1024**3)
+        self.assertEqual(args.host_reserve, 512 * 1024**2)
         self.assertEqual(args.max_context, 102400)
+        self.assertEqual(args.request_timeout, 1800.0)
 
     def test_size_validation(self):
         for value in ("1G", "1GB", "1GiB", "1073741824"):
@@ -82,7 +86,9 @@ class LauncherTests(unittest.TestCase):
         for flag, values in (
             ("--max-context", ("0", "-1", "257K", "bad")),
             ("--max-memory", ("0", "-1G", "bad", str(2**64))),
+            ("--host-reserve", ("0", "-1G", "bad", str(2**64))),
             ("--max-request-size", ("auto", "0", "-1G", "bad", str(2**64))),
+            ("--request-timeout", ("0", "-1", "nan", "inf", "bad")),
         ):
             for value in values:
                 with self.subTest(value=value), mock.patch("sys.stderr", io.StringIO()):
@@ -175,11 +181,17 @@ class LauncherTests(unittest.TestCase):
                     argv[argv.index("--max-memory") + 1], str(28 * 1024**3)
                 )
                 self.assertEqual(
+                    argv[argv.index("--host-reserve") + 1], str(512 * 1024**2)
+                )
+                self.assertEqual(
                     argv[argv.index("--binary") + 1], str(launcher.paths.BINARY)
                 )
                 self.assertEqual(argv[argv.index("--model") + 1], MODEL_ID)
                 self.assertEqual(
                     argv[argv.index("--max-request-size") + 1], str(256 * 1024**2)
+                )
+                self.assertEqual(
+                    argv[argv.index("--request-timeout") + 1], "14400.0"
                 )
                 self.assertEqual(
                     argv[-4:],
@@ -225,6 +237,10 @@ class LauncherTests(unittest.TestCase):
                         "100K",
                         "--max-memory",
                         "28G",
+                        "--host-reserve",
+                        "512M",
+                        "--request-timeout",
+                        "14400",
                         "--allowed-host",
                         "splash.local",
                         "--allowed-host",

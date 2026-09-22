@@ -45,6 +45,17 @@ struct SplashChunkedPrefillParams {
 static_assert(sizeof(SplashChunkedPrefillParams) == 32,
               "Q8 chunked store parameters are 32 bytes on both sides");
 
+struct SplashTQ4StoreParams {
+  SplashChunkedPrefillParams chunk;
+  uint32_t layer_index;
+  uint32_t reserved0;
+  uint32_t reserved1;
+  uint32_t reserved2;
+};
+
+static_assert(sizeof(SplashTQ4StoreParams) == 48,
+              "TQ4 store parameters are 48 bytes on both sides");
+
 // Prefill divides each query tile's visible Page32 history into balanced
 // splits. The same count and partition rule are used by split and reduce.
 struct SplashQ8PrefillAttentionParams {
@@ -61,6 +72,33 @@ struct SplashQ8PrefillAttentionParams {
 static_assert(sizeof(SplashQ8PrefillAttentionParams) == 32,
               "Q8 prefill attention parameters are 32 bytes on both sides");
 
+struct SplashTQ4PrefillAttentionParams {
+  SplashQ8PrefillAttentionParams attention;
+  uint32_t layer_index;
+  uint32_t reserved0;
+  uint32_t reserved1;
+  uint32_t reserved2;
+};
+
+static_assert(sizeof(SplashTQ4PrefillAttentionParams) == 48,
+              "TQ4 prefill attention parameters are 48 bytes on both sides");
+
+// Prefill-only, one-KV-head staging.  The host reuses the same two BF16
+// [maximum context, head dimension] planes for all four heads and all layers.
+struct SplashTQ4StagedPrefillParams {
+  uint32_t committed_tokens;
+  uint32_t rows;
+  uint32_t chunk_stride;
+  uint32_t visible_tokens;
+  uint32_t layer_index;
+  uint32_t kv_head;
+  uint32_t reserved0;
+  uint32_t reserved1;
+};
+
+static_assert(sizeof(SplashTQ4StagedPrefillParams) == 32,
+              "TQ4 staged prefill parameters are 32 bytes on both sides");
+
 struct SplashQ8VerifyAttentionParams {
   uint32_t committed_tokens;
   uint32_t active_rows;
@@ -76,3 +114,14 @@ struct SplashQ8VerifyAttentionParams {
 
 static_assert(sizeof(SplashQ8VerifyAttentionParams) == 32,
               "Q8 verify attention parameters are 32 bytes on both sides");
+
+struct SplashTQ4VerifyAttentionParams {
+  SplashQ8VerifyAttentionParams attention;
+  uint32_t layer_index;
+  uint32_t reserved0;
+  uint32_t reserved1;
+  uint32_t reserved2;
+};
+
+static_assert(sizeof(SplashTQ4VerifyAttentionParams) == 48,
+              "TQ4 verify attention parameters are 48 bytes on both sides");

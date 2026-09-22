@@ -240,6 +240,8 @@ struct QwenTargetPrefillBuffers final {
   metal::MetalBuffer ropeSin;
   metal::MetalBuffer chunkKeys;
   metal::MetalBuffer chunkValues;
+  metal::MetalBuffer tq4StagedKeys;
+  metal::MetalBuffer tq4StagedValues;
   metal::MetalBuffer selectedExperts;
   metal::MetalBuffer routingWeights;
   metal::MetalBuffer tileDescriptors;
@@ -332,9 +334,19 @@ public:
       metal::CommandGraph &graph, QwenTargetPrefillBuffers buffers,
       std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
       std::span<const kv::Q8LayerStorage> kvLayers) const;
+  void addPrefill(
+      metal::CommandGraph &graph, QwenTargetPrefillBuffers buffers,
+      std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
+      std::span<const kv::TQ4LayerStorage> kvLayers) const;
   void addVerify(
       metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers,
       std::span<const kv::Q8LayerStorage> kvLayers,
+      std::span<const kv::Q8ChunkedPrefillParams> q8,
+      std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
+      ops::Q4DispatchStats &stats) const;
+  void addVerify(
+      metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers,
+      std::span<const kv::TQ4LayerStorage> kvLayers,
       std::span<const kv::Q8ChunkedPrefillParams> q8,
       std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
       ops::Q4DispatchStats &stats) const;
@@ -350,17 +362,17 @@ private:
   using WeightView =
       std::variant<const Qwen3_8Weights *, const Qwen3_6MoeWeights *>;
 
-  template <class Weights>
+  template <class Weights, class KvLayer>
   void addPrefillImpl(
       const Weights &weights, metal::CommandGraph &graph,
       QwenTargetPrefillBuffers buffers,
       std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
-      std::span<const kv::Q8LayerStorage> kvLayers) const;
-  template <class Weights>
+      std::span<const KvLayer> kvLayers) const;
+  template <class Weights, class KvLayer>
   void addVerifyImpl(
       const Weights &weights, metal::CommandGraph &graph,
       QwenTargetVerifyBuffers buffers,
-      std::span<const kv::Q8LayerStorage> kvLayers,
+      std::span<const KvLayer> kvLayers,
       std::span<const kv::Q8ChunkedPrefillParams> q8,
       std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
       ops::Q4DispatchStats &stats) const;

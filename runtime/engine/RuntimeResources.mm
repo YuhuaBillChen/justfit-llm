@@ -164,7 +164,8 @@ canonicalRuntimeCacheNamespace(const RuntimeCacheIdentity &identity) {
             << '\n'
             << "build_id_bytes=" << identity.buildId.size() << '\n'
             << "build_id=" << identity.buildId << '\n'
-            << "dtype=" << kQ8FormatName << '\n'
+            << "dtype="
+            << (identity.tq4Kv ? kTQ4FormatName : kQ8FormatName) << '\n'
             << "page_tokens=" << identity.q8Layout.pageTokens << '\n'
             << "elements_per_scale=" << identity.q8Layout.elementsPerScale
             << '\n'
@@ -224,7 +225,8 @@ RuntimeCacheIdentity
 makeRuntimeCacheIdentity(std::string_view combinedManifestSha256,
                          std::string_view targetManifestSha256,
                          std::string_view buildId,
-                         kv::Q8Layout targetKvLayout) {
+                         kv::Q8Layout targetKvLayout,
+                         bool tq4Kv) {
   if (buildId.empty()) {
     throw std::invalid_argument("runtime build id is required");
   }
@@ -239,6 +241,7 @@ makeRuntimeCacheIdentity(std::string_view combinedManifestSha256,
   result.modelLayoutSha256 = digestHex(combinedDigest);
   result.buildId = buildId;
   result.q8Layout = kv::makeQ8LayoutGuard(targetKvLayout, targetDigest);
+  result.tq4Kv = tq4Kv;
   result.namespaceSha256 = canonicalRuntimeCacheNamespace(result);
   result.cacheNamespace.digest = parseSha256(result.namespaceSha256);
   return result;
@@ -256,22 +259,28 @@ RuntimeResourcesError::RuntimeResourcesError(RuntimeResourceStage stage,
 
 RuntimeResources::RuntimeResources(
     std::unique_ptr<metal::MetalBackend> backend, model::ModelPackage model,
-    ops::ExecutionPlans operators,
+    std::filesystem::path modelRoot, ops::ExecutionPlans operators,
     EngineMemoryPlan memoryPlan, model::ModelMemoryPlan modelMemoryPlan,
     RuntimeCacheIdentity cacheIdentity,
     std::unique_ptr<MemoryGovernor> memoryGovernor,
     std::unique_ptr<kv::Q8PageStorage> kvPages,
+    std::unique_ptr<kv::TQ4PageStorage> tq4Pages,
     std::unique_ptr<model::StateStorage> stateStorage,
     std::unique_ptr<KvPool> kvPool, std::unique_ptr<engine::Cache> cache,
-    uint32_t maximumImagePatches)
+    uint32_t maximumImagePatches, bool justFitPhaseResidency,
+    bool justFitTq4Kv)
     : backend_(std::move(backend)), model_(std::move(model)),
+      modelRoot_(std::move(modelRoot)),
       operators_(std::move(operators)),
       memoryPlan_(std::move(memoryPlan)),
       modelMemoryPlan_(std::move(modelMemoryPlan)),
       cacheIdentity_(std::move(cacheIdentity)),
       memoryGovernor_(std::move(memoryGovernor)), kvPages_(std::move(kvPages)),
+      tq4Pages_(std::move(tq4Pages)),
       stateStorage_(std::move(stateStorage)), kvPool_(std::move(kvPool)),
-      cache_(std::move(cache)), maximumImagePatches_(maximumImagePatches) {}
+      cache_(std::move(cache)), maximumImagePatches_(maximumImagePatches),
+      justFitPhaseResidency_(justFitPhaseResidency),
+      justFitTq4Kv_(justFitTq4Kv) {}
 
 std::unique_ptr<RuntimeResources>
 RuntimeResources::create(const RuntimeResourcesConfig &config) {
@@ -303,8 +312,10 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
                                 *error, deviceStatusJson(device));
   }
 
-  const uint64_t hostReserveBytes =
-      EngineMemoryPolicy::hostAvailableReserveBytes(device.physicalMemoryBytes);
+  const bool explicitHostReserve = config.hostReserveBytes != 0;
+  const uint64_t hostReserveBytes = explicitHostReserve
+      ? config.hostReserveBytes
+      : EngineMemoryPolicy::hostAvailableReserveBytes(device.physicalMemoryBytes);
   MemoryGovernor::HostAvailableMemoryProvider hostAvailableMemory =
       config.hostAvailableMemory ? config.hostAvailableMemory
                                  : queryHostAvailableMemory;
@@ -346,9 +357,18 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
   }
 
   model::ModelPackage package;
+  uint64_t measuredVisionWeightsBytes = 0;
   try {
     package = model::loadModelPackage(*backend, config.modelRoot, config.model);
     requireLoadedModel(package);
+    measuredVisionWeightsBytes = package.vision.actualAllocatedBytes;
+    if (config.justFitPhaseResidency) {
+      // Preserve the validated combined manifest fingerprint, descriptor and
+      // measured byte count, but release every Metal view retaining the
+      // vision mmap before sizing the KV pool.
+      package.vision = {};
+      static_cast<void>(backend->refreshMemoryStats());
+    }
   } catch (const metal::MetalAllocationError &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::ModelLoading,
                                 error.what(), deviceStatusJson(device), {},
@@ -364,7 +384,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
   model::ModelMemoryPlan modelMemoryPlan;
   auto prepareMemory = [&]() -> EngineMemoryPlan {
     try {
-      modelMemoryPlan = model::plannedRuntimeMemory(device, package, operators);
+      modelMemoryPlan = model::plannedRuntimeMemory(
+          device, package, operators, config.justFitTq4Kv);
       if (auto error = modelMemoryPlan.validationError()) {
         throw std::invalid_argument(*error);
       }
@@ -378,17 +399,19 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     ModelMemoryFootprint footprint{
         package.targetActualAllocatedBytes(),
         package.draft.actualAllocatedBytes,
-        package.vision.actualAllocatedBytes,
+        config.justFitPhaseResidency ? 0 : measuredVisionWeightsBytes,
         modelMemoryPlan.activeStateCellPlannedAllocatedBytes,
         modelMemoryPlan.sharedPrefillPlannedAllocatedBytes,
         modelMemoryPlan.sharedDecodePlannedAllocatedBytes,
         modelMemoryPlan.pipelineReserveBytes,
         modelMemoryPlan.runtimeOverheadReserveBytes,
+        config.justFitPhaseResidency,
+        config.justFitPhaseResidency,
     };
 
     ModelMemoryProfile modelProfile{
         package.name(), package.maximumContextTokens(),
-        package.targetKvLayout(), footprint};
+        package.targetKvLayout(), footprint, config.justFitTq4Kv};
     EngineMemoryPlanResult planResult =
         evaluateEngineMemoryPlan(device, modelProfile, config.maximumMemoryBytes);
     if (!planResult.plan) {
@@ -406,10 +429,12 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
 
   RuntimeCacheIdentity cacheIdentity;
   try {
+    const std::string cacheBuildId =
+        config.justFitTq4Kv ? config.buildId + "-justfit-tq4" : config.buildId;
     cacheIdentity = makeRuntimeCacheIdentity(
         package.manifestFingerprintSha256,
-        package.targetManifestFingerprint(), config.buildId,
-        package.targetKvLayout());
+        package.targetManifestFingerprint(), cacheBuildId,
+        package.targetKvLayout(), config.justFitTq4Kv);
   } catch (const std::exception &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::ModelLoading,
                                 error.what(), memoryPlan.toStatusJson(),
@@ -431,7 +456,8 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     const uint64_t elasticGrowthCeiling =
         baselineBudget.hardBudgetBytes - runtimeReserve;
     auto memoryGovernor = std::make_unique<MemoryGovernor>(
-        *backend, elasticGrowthCeiling, hostReserveBytes, hostAvailableMemory);
+        *backend, elasticGrowthCeiling, hostReserveBytes, hostAvailableMemory,
+        explicitHostReserve);
     if (config.memoryPressure)
       memoryGovernor->setPressure(config.memoryPressure());
     std::string rejected;
@@ -466,22 +492,41 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     }
 
     const EngineMemoryBreakdown &budget = memoryPlan.breakdown();
-    auto kvPages = std::make_unique<kv::Q8PageStorage>(
-        *backend, memoryGovernor->allocationAdmission(), package.targetKvLayout(),
-        budget.kvVirtualPages);
+    std::unique_ptr<kv::Q8PageStorage> kvPages;
+    std::unique_ptr<kv::TQ4PageStorage> tq4Pages;
+    kv::Backing *kvBacking = nullptr;
+    if (config.justFitTq4Kv) {
+      const kv::Q8Layout q8 = package.targetKvLayout();
+      tq4Pages = std::make_unique<kv::TQ4PageStorage>(
+          *backend, memoryGovernor->allocationAdmission(),
+          kv::TQ4Layout{q8.attentionLayers, q8.kvHeads, q8.headDimension},
+          budget.kvVirtualPages);
+      kvBacking = tq4Pages.get();
+    } else {
+      kvPages = std::make_unique<kv::Q8PageStorage>(
+          *backend, memoryGovernor->allocationAdmission(),
+          package.targetKvLayout(), budget.kvVirtualPages);
+      kvBacking = kvPages.get();
+    }
     auto stateStorage = model::createStateStorage(
         *backend, memoryGovernor->allocationAdmission(), package);
     if (!stateStorage) {
       throw std::runtime_error("model factory returned no state storage");
     }
-    auto kvPool = std::make_unique<KvPool>(*kvPages);
+    auto kvPool = std::make_unique<KvPool>(*kvBacking);
     auto cache =
         std::make_unique<engine::Cache>(*kvPool, cacheIdentity.cacheNamespace);
 
-    if (kvPages->declaredBytes() != budget.kvVirtualBytes ||
-        kvPages->actualAllocatedBytes() > budget.kvVirtualBytes) {
+    const uint64_t declaredKvBytes = config.justFitTq4Kv
+                                         ? tq4Pages->declaredBytes()
+                                         : kvPages->declaredBytes();
+    const uint64_t allocatedKvBytes = config.justFitTq4Kv
+                                          ? tq4Pages->actualAllocatedBytes()
+                                          : kvPages->actualAllocatedBytes();
+    if (declaredKvBytes != budget.kvVirtualBytes ||
+        allocatedKvBytes > budget.kvVirtualBytes) {
       throw std::runtime_error(
-          "actual Q8 page storage exceeds its planned category");
+          "actual KV page storage exceeds its planned category");
     }
     if (stateStorage->actualAllocatedBytes() != 0) {
       throw std::runtime_error("state cells were allocated eagerly");
@@ -499,11 +544,14 @@ RuntimeResources::create(const RuntimeResourcesConfig &config) {
     }
 
     auto result = std::unique_ptr<RuntimeResources>(new RuntimeResources(
-        std::move(backend), std::move(package), std::move(operators),
+        std::move(backend), std::move(package), config.modelRoot,
+        std::move(operators),
         std::move(memoryPlan),
         std::move(modelMemoryPlan), std::move(cacheIdentity),
-        std::move(memoryGovernor), std::move(kvPages), std::move(stateStorage),
-        std::move(kvPool), std::move(cache), config.maximumImagePatches));
+        std::move(memoryGovernor), std::move(kvPages), std::move(tq4Pages),
+        std::move(stateStorage),
+        std::move(kvPool), std::move(cache), config.maximumImagePatches,
+        config.justFitPhaseResidency, config.justFitTq4Kv));
     return result;
   } catch (const metal::MetalAllocationError &error) {
     throw RuntimeResourcesError(RuntimeResourceStage::StorageAllocation,
@@ -523,12 +571,16 @@ model::RuntimeContext RuntimeResources::modelContext() noexcept {
       *backend_,
       memoryGovernor_->allocationAdmission(),
       model_,
-      *kvPages_,
+      modelRoot_,
+      kvPages_.get(),
+      tq4Pages_.get(),
       *stateStorage_,
       operators_,
       maximumImagePatches_,
       budget.pipelineReserveBytes,
       budget.runtimeOverheadReserveBytes,
+      justFitPhaseResidency_,
+      justFitTq4Kv_,
   };
 }
 
@@ -542,7 +594,8 @@ ActualMemoryReport RuntimeResources::actualMemoryReport(
   report.stateResidentBytes = modelMemory.stateActualAllocatedBytes;
   report.sharedPrefillBytes = modelMemory.sharedPrefillActualAllocatedBytes;
   report.sharedDecodeBytes = modelMemory.sharedDecodeActualAllocatedBytes;
-  report.kvResidentBytes = kvPages_->actualAllocatedBytes();
+  report.kvResidentBytes = justFitTq4Kv_ ? tq4Pages_->actualAllocatedBytes()
+                                         : kvPages_->actualAllocatedBytes();
   // Optional warmup may end with a rolled-back allocation and no subsequent
   // command. Refresh current residency after that rollback; peaks stay intact.
   metal::MetalMemoryStats memory = backend_->refreshMemoryStats();

@@ -96,6 +96,9 @@ void testHardBudgetBoundaries() {
               EngineMemoryPolicy::hardBudgetBytes(12 * kGiB, 16 * kGiB) ==
                   11 * kGiB,
           "preflight ceiling disagrees with automatic or explicit policy");
+  require(EngineMemoryPolicy::hardBudgetBytes(12 * kGiB, 11 * kGiB + 512 * kMiB) ==
+              11 * kGiB + 512 * kMiB,
+          "an explicit sub-working-set ceiling could not use automatic margin");
   require(EngineMemoryPolicy::hardBudgetBytes(0) == 0 &&
               EngineMemoryPolicy::hardBudgetBytes(kGiB, 1) == 0,
           "insufficient working set underflowed the preflight ceiling");
@@ -120,6 +123,65 @@ void testModelProvidedKvGeometry() {
               plan.toStatusJson().find("\"kv_heads\":2") !=
                   std::string::npos,
           "model-provided Q8 geometry is missing from status");
+}
+
+void testTq4FullNativeWindowGeometry() {
+  ModelMemoryProfile compact = model();
+  compact.name = "tq4-full-window-test";
+  compact.tq4Kv = true;
+  compact.maximumContextTokens = 256 * 1024;
+
+  constexpr uint32_t virtualPages = 8200;
+  const uint64_t exactBudget = compact.fixedRuntimeBytes() +
+                               compact.footprint.activeStateCellBytes +
+                               uint64_t{virtualPages} * compact.kvPageBytes();
+  DeviceCapabilities tq4Device = device(32 * kGiB);
+  tq4Device.physicalMemoryBytes = 64 * kGiB;
+  EngineMemoryPlan plan =
+      requireEngineMemoryPlan(tq4Device, compact, exactBudget);
+  const auto &budget = plan.breakdown();
+  require(budget.kvPageBytes == 532'480 &&
+              budget.kvSparseMappingBatchPages == 8 &&
+              budget.kvVirtualPages == virtualPages &&
+              budget.kvVirtualBytes ==
+                  uint64_t{virtualPages} * compact.kvPageBytes(),
+          "TQ4 page-major geometry or sparse rounding is incorrect");
+  require(plan.maximumContextTokens() == 256 * 1024,
+          "TQ4 plan did not cover the full native window plus scratch");
+  const std::string json = plan.toStatusJson();
+  require(json.find("\"kv_quantization_bits\":4") != std::string::npos,
+          "TQ4 memory plan is missing its public format identity");
+}
+
+void testPhaseManagedVisionMayBeNonresident() {
+  ModelMemoryProfile resident = model();
+  resident.footprint.visionWeightsBytes = 0;
+  auto rejected = evaluateEngineMemoryPlan(device(), resident);
+  require(!rejected.plan &&
+              rejected.status.code == BudgetErrorCode::InvalidModelSpec,
+          "missing resident vision weights were accepted");
+
+  ModelMemoryProfile phaseManaged = resident;
+  phaseManaged.footprint.phaseManagedVision = true;
+  EngineMemoryPlan plan = requireEngineMemoryPlan(device(), phaseManaged);
+  require(plan.breakdown().visionWeightsBytes == 0,
+          "phase-managed vision was charged as resident memory");
+  require(plan.maximumContextTokens() > 0,
+          "phase-managed vision left no usable KV capacity");
+}
+
+void testPhaseManagedDraftAndPrefillDoNotOverlap() {
+  ModelMemoryProfile resident = model();
+  const uint64_t residentBytes = resident.fixedRuntimeBytes();
+  resident.footprint.phaseManagedDraft = true;
+  require(resident.fixedRuntimeBytes() ==
+              residentBytes - std::min(resident.footprint.draftWeightsBytes,
+                                       resident.footprint.sharedPrefillBytes),
+          "phase-managed draft did not remove the impossible prefill overlap");
+  EngineMemoryPlan plan = requireEngineMemoryPlan(device(), resident);
+  require(plan.toStatusJson().find("\"phase_managed_draft\":true") !=
+              std::string::npos,
+          "phase-managed draft policy is missing from status");
 }
 
 } // namespace
@@ -155,6 +217,9 @@ int main() {
     testUserCeilingAndFailure();
     testHardBudgetBoundaries();
     testModelProvidedKvGeometry();
+    testTq4FullNativeWindowGeometry();
+    testPhaseManagedVisionMayBeNonresident();
+    testPhaseManagedDraftAndPrefillDoNotOverlap();
     testDeviceValidationNamesTheMacosFloor();
     std::cout << "elastic memory plan tests passed\n";
     return EXIT_SUCCESS;

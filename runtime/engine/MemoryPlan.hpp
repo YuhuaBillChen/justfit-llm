@@ -30,6 +30,13 @@ struct ModelMemoryFootprint final {
   uint64_t sharedDecodeBytes = 0;
   uint64_t pipelineReserveBytes = 0;
   uint64_t runtimeOverheadReserveBytes = 0;
+  // A zero vision term is valid only when the model package was validated
+  // first and the vision component is deliberately nonresident.
+  bool phaseManagedVision = false;
+  // JustFit text B1 never needs target-prefill scratch and the DFlash weights
+  // at the same time. This flag permits the planner to budget their maximum
+  // instead of their sum; runtime transitions remain GPU-safe and measured.
+  bool phaseManagedDraft = false;
 };
 
 struct ModelMemoryProfile final {
@@ -37,9 +44,32 @@ struct ModelMemoryProfile final {
   uint32_t maximumContextTokens = 0;
   kv::Q8Layout targetKvLayout;
   ModelMemoryFootprint footprint;
+  bool tq4Kv = false;
 
   [[nodiscard]] std::optional<std::string> validationError() const;
   [[nodiscard]] uint64_t fixedRuntimeBytes() const;
+  [[nodiscard]] constexpr kv::TQ4Layout tq4Layout() const noexcept {
+    return {targetKvLayout.attentionLayers, targetKvLayout.kvHeads,
+            targetKvLayout.headDimension};
+  }
+  [[nodiscard]] constexpr uint64_t kvPageBytes() const noexcept {
+    return tq4Kv ? tq4Layout().bytesPerModelPage()
+                 : targetKvLayout.bytesPerModelPage();
+  }
+  [[nodiscard]] constexpr uint32_t kvMappingBatchPages() const noexcept {
+    return tq4Kv ? tq4Layout().sparseMappingBatchPages()
+                 : targetKvLayout.sparseMappingBatchPages();
+  }
+  [[nodiscard]] constexpr uint32_t kvExtentPages() const noexcept {
+    return tq4Kv ? tq4Layout().backingExtentPages()
+                 : targetKvLayout.backingExtentPages();
+  }
+  [[nodiscard]] constexpr uint64_t kvLargestBufferBytesPerPage() const noexcept {
+    return tq4Kv
+               ? tq4Layout().bytesPerModelPage()
+               : std::max(targetKvLayout.dataBytesPerLayerPage(),
+                          targetKvLayout.scaleBytesPerLayerPage());
+  }
 };
 
 [[nodiscard]] std::string modelStatusJson(const ModelMemoryProfile &model);
@@ -68,7 +98,15 @@ struct EngineMemoryPolicy {
     const uint64_t automatic = recommendedWorkingSetBytes > margin
                                    ? recommendedWorkingSetBytes - margin
                                    : 0;
-    return maximumMemoryBytes && maximumMemoryBytes < automatic
+    if (!automatic)
+      return 0;
+    if (!maximumMemoryBytes)
+      return automatic;
+    // An explicit ceiling may deliberately use part of the automatic margin,
+    // but never permit the engine to exceed Metal's reported working set. A
+    // value above the working set is invalid as an override and retains the
+    // conservative automatic policy.
+    return maximumMemoryBytes < recommendedWorkingSetBytes
                ? maximumMemoryBytes
                : automatic;
   }

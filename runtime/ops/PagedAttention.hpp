@@ -18,6 +18,10 @@ namespace splash::kv {
 using Q8ChunkedPrefillParams = ::SplashChunkedPrefillParams;
 using Q8VerifyAttentionParams = ::SplashQ8VerifyAttentionParams;
 using Q8PrefillAttentionParams = ::SplashQ8PrefillAttentionParams;
+using TQ4StoreParams = ::SplashTQ4StoreParams;
+using TQ4PrefillAttentionParams = ::SplashTQ4PrefillAttentionParams;
+using TQ4StagedPrefillParams = ::SplashTQ4StagedPrefillParams;
+using TQ4VerifyAttentionParams = ::SplashTQ4VerifyAttentionParams;
 
 static_assert(std::is_standard_layout_v<Q8ChunkedPrefillParams>);
 static_assert(std::is_trivially_copyable_v<Q8ChunkedPrefillParams>);
@@ -25,6 +29,14 @@ static_assert(std::is_standard_layout_v<Q8VerifyAttentionParams>);
 static_assert(std::is_trivially_copyable_v<Q8VerifyAttentionParams>);
 static_assert(std::is_standard_layout_v<Q8PrefillAttentionParams>);
 static_assert(std::is_trivially_copyable_v<Q8PrefillAttentionParams>);
+static_assert(std::is_standard_layout_v<TQ4StoreParams>);
+static_assert(std::is_trivially_copyable_v<TQ4StoreParams>);
+static_assert(std::is_standard_layout_v<TQ4PrefillAttentionParams>);
+static_assert(std::is_trivially_copyable_v<TQ4PrefillAttentionParams>);
+static_assert(std::is_standard_layout_v<TQ4StagedPrefillParams>);
+static_assert(std::is_trivially_copyable_v<TQ4StagedPrefillParams>);
+static_assert(std::is_standard_layout_v<TQ4VerifyAttentionParams>);
+static_assert(std::is_trivially_copyable_v<TQ4VerifyAttentionParams>);
 
 inline constexpr uint32_t kQ8VerifyMaximumRows = SPLASH_TARGET_VERIFY_ROWS;
 inline constexpr uint32_t kQ8VerifySplits = SPLASH_VERIFY_ATTENTION_SPLITS;
@@ -326,6 +338,13 @@ public:
                               metal::MetalBuffer pageTable,
                               const kv::Q8ChunkedPrefillParams &params,
                               kv::Q8Layout layout);
+  static void addPrefillStore(metal::CommandGraph &graph,
+                              const kv::TQ4LayerStorage &layer,
+                              metal::MetalBuffer chunkKeys,
+                              metal::MetalBuffer chunkValues,
+                              metal::MetalBuffer pageTable,
+                              const kv::Q8ChunkedPrefillParams &params,
+                              kv::TQ4Layout layout);
   // Queries and output are [KV head][row][query head in group][dimension] and
   // must not alias. Encode the store before attention; both stay in one
   // compute encoder. The plan owns both dispatch grids and their exact scratch.
@@ -339,8 +358,28 @@ public:
                          metal::MetalBuffer pageTable,
                          const kv::Q8ChunkedPrefillParams &chunk,
                          const PrefillAttentionPlan &plan);
+  static void addPrefill(metal::CommandGraph &graph,
+                         const kv::TQ4LayerStorage &layer,
+                         metal::MetalBuffer queries, metal::MetalBuffer output,
+                         metal::MetalBuffer partials,
+                         metal::MetalBuffer statistics,
+                         metal::MetalBuffer pageTable,
+                         const kv::Q8ChunkedPrefillParams &chunk,
+                         const PrefillAttentionPlan &plan);
+  static void addStagedPrefill(
+      metal::CommandGraph &graph, const kv::TQ4LayerStorage &layer,
+      metal::MetalBuffer queries, metal::MetalBuffer output,
+      metal::MetalBuffer stagedKeys, metal::MetalBuffer stagedValues,
+      metal::MetalBuffer pageTable,
+      const kv::Q8ChunkedPrefillParams &chunk, kv::TQ4Layout layout);
   static void
   addVerify(metal::CommandGraph &graph, const kv::Q8LayerStorage &layer,
+            PagedVerifyBuffers buffers,
+            std::span<const kv::Q8ChunkedPrefillParams> storeParams,
+            std::span<const kv::Q8VerifyAttentionParams> attentionParams,
+            const VerifyAttentionPlan &plan);
+  static void
+  addVerify(metal::CommandGraph &graph, const kv::TQ4LayerStorage &layer,
             PagedVerifyBuffers buffers,
             std::span<const kv::Q8ChunkedPrefillParams> storeParams,
             std::span<const kv::Q8VerifyAttentionParams> attentionParams,

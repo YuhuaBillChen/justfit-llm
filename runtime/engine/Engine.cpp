@@ -968,6 +968,13 @@ void Engine::suspendForGrowth(Request &active, uint64_t workEnd, double now) {
   }
   model_.suspend(active.request.id);
   cache_.endRequest(active.request.id);
+  // KV-only cache entries are not a restore point for the hybrid recurrent
+  // model. Keeping them resident while replay starts at token zero duplicates
+  // the suspended prefix. Convert that unusable suffix into resident free
+  // pages so the replay reuses the same backing instead of allocating a
+  // second copy. A state-backed prefix, when present, remains cached.
+  if (cache_.reclaimStateFreeKvForReuse())
+    signalResourceProgress();
   active.stateCell.reset();
   active.suspended = true;
   active.resumeKvTargetTokens = workEnd;

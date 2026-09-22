@@ -5,6 +5,7 @@ import argparse
 import fcntl
 import http.client
 import json
+import math
 import os
 import socket
 import subprocess
@@ -175,6 +176,10 @@ def serve(args):
             str(args.port),
             "--max-memory",
             "auto" if args.max_memory is None else str(args.max_memory),
+            "--host-reserve",
+            "auto"
+            if getattr(args, "host_reserve", None) is None
+            else str(args.host_reserve),
             "--max-context",
             "auto" if args.max_context is None else str(args.max_context),
         ]
@@ -182,6 +187,7 @@ def serve(args):
             command.extend(["--max-request-size", str(args.max_request_size)])
         if args.max_image_pixels is not None:
             command.extend(["--max-image-pixels", str(args.max_image_pixels)])
+        command.extend(["--request-timeout", str(args.request_timeout)])
         if args.no_webui:
             command.append("--no-webui")
         for host in args.allowed_host:
@@ -304,6 +310,18 @@ def _parse_max_context(value):
     return result
 
 
+def _parse_positive_seconds(value):
+    try:
+        result = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "use a positive finite number of seconds"
+        ) from None
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("use a positive finite number of seconds")
+    return result
+
+
 def _version():
     if not paths.PACKAGED:
         return "Splash (source checkout)"
@@ -350,9 +368,20 @@ def parse_args(argv=None):
         help="Metal budget ceiling, e.g. 28G (default: auto)",
     )
     server.add_argument(
+        "--host-reserve",
+        type=_parse_max_memory,
+        help="hard host-memory reserve for measured boundary runs (default: auto)",
+    )
+    server.add_argument(
         "--max-context",
         type=_parse_max_context,
         help="context limit, e.g. 100K (default: auto)",
+    )
+    server.add_argument(
+        "--request-timeout",
+        type=_parse_positive_seconds,
+        default=1800.0,
+        help="end-to-end request timeout in seconds (default: 1800)",
     )
     server.add_argument(
         "--allowed-host",

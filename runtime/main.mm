@@ -16,6 +16,7 @@
 #include <charconv>
 #include <csignal>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -55,7 +56,18 @@ struct NativeArguments final {
   model::ModelDescriptor model;
   uint32_t maxContext = 0;
   uint64_t maxMemoryBytes = 0;
+  uint64_t hostReserveBytes = 0;
+  bool justFitPhaseResidency = false;
+  bool justFitTq4Kv = false;
 };
+
+bool enabledEnvironmentFlag(const char *name) {
+  const char *value = std::getenv(name);
+  if (!value)
+    return false;
+  const std::string_view flag(value);
+  return flag == "1" || flag == "true" || flag == "yes" || flag == "on";
+}
 
 // One observer spans bootstrap and serving. The dispatch queue only records
 // pressure and wakes control; all allocation/reclaim decisions stay on the
@@ -124,7 +136,8 @@ private:
 void printUsage(std::string_view executable) {
   std::cerr << "usage: " << executable
             << " serve-native TARGET_DIRECTORY DRAFT_DIRECTORY"
-               " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto\n";
+               " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto"
+               " [HOST_RESERVE_BYTES|auto]\n";
 }
 
 template <typename T>
@@ -183,7 +196,8 @@ std::filesystem::path requireModelRoot(std::string_view targetArgument,
 }
 
 NativeArguments parseArguments(int argc, char **argv) {
-  if (argc != 6 || std::string_view(argv[1]) != "serve-native") {
+  if ((argc != 6 && argc != 7) ||
+      std::string_view(argv[1]) != "serve-native") {
     throw UsageError("expected the serve-native command");
   }
   NativeArguments result;
@@ -191,6 +205,11 @@ NativeArguments parseArguments(int argc, char **argv) {
   result.model = model::inspectModelPackage(result.modelRoot);
   result.maxContext = parseMaxContext(argv[4], result.model.capabilities);
   result.maxMemoryBytes = parseMaxMemory(argv[5]);
+  if (argc == 7)
+    result.hostReserveBytes = parseMaxMemory(argv[6]);
+  result.justFitPhaseResidency =
+      enabledEnvironmentFlag("SPLASH_JUSTFIT_PHASE_RESIDENCY");
+  result.justFitTq4Kv = enabledEnvironmentFlag("SPLASH_JUSTFIT_TQ4_KV");
   return result;
 }
 
@@ -232,9 +251,19 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.model = arguments.model;
   config.resources.buildId = SPLASH_BUILD_ID;
   config.resources.maximumMemoryBytes = arguments.maxMemoryBytes;
+  config.resources.hostReserveBytes = arguments.hostReserveBytes;
+  config.resources.justFitPhaseResidency = arguments.justFitPhaseResidency;
+  config.resources.justFitTq4Kv = arguments.justFitTq4Kv;
   config.resources.maximumImagePatches = kMaximumImagePatches;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.maxImagePatches = kMaximumImagePatches;
+  if (arguments.justFitPhaseResidency) {
+    // Intermediate APC checkpoints force DFlash context materialization every
+    // 4K tokens and therefore keep the draft weights resident throughout a
+    // cold prefill. Preserve the reusable prompt-end state while allowing the
+    // draft to remain absent until the final context window.
+    config.nativeLoop.engine.prefillCheckpointTokens = 0;
+  }
   config.protocolLimits.maxImagePatches = kMaximumImagePatches;
   config.nativeLoop.engineInstanceId = engineInstanceId();
   config.nativeLoop.maskWordsPerToken = maskWordsPerToken;

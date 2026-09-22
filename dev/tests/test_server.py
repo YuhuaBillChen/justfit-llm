@@ -3003,11 +3003,16 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(Path(args.tokenizer), package / "tokenizer")
         self.assertIsNone(args.max_context)
         self.assertIsNone(args.max_memory)
+        self.assertIsNone(args.host_reserve)
         self.assertEqual(
             api.parse_args([*required, "--max-context", "262144"]).max_context, 262144
         )
         self.assertEqual(
             api.parse_args([*required, "--max-memory", "32G"]).max_memory, 32 * 1024**3
+        )
+        self.assertEqual(
+            api.parse_args([*required, "--host-reserve", "512M"]).host_reserve,
+            512 * 1024**2,
         )
         self.assertEqual(args.max_new_tokens, 32768)
         self.assertEqual(args.request_timeout, 1800)
@@ -3031,6 +3036,8 @@ class ServerTest(unittest.TestCase):
                 ("--max-context", "not-a-number"),
                 ("--max-memory", "0"),
                 ("--max-memory", "not-a-number"),
+                ("--host-reserve", "0"),
+                ("--host-reserve", "not-a-number"),
                 ("--max-new-tokens", "0"),
                 ("--request-timeout", "0"),
                 ("--request-timeout", "nan"),
@@ -3168,6 +3175,7 @@ class ServerTest(unittest.TestCase):
                 "serve-native",
                 "target",
                 "draft",
+                "auto",
                 "auto",
                 "auto",
             ],

@@ -128,9 +128,11 @@ MemoryGovernor::MemoryGovernor(metal::MetalBackend &backend,
 MemoryGovernor::MemoryGovernor(
     metal::MetalBackend &backend, uint64_t limitBytes,
     uint64_t hostReserveBytes,
-    HostAvailableMemoryProvider hostAvailableMemory)
+    HostAvailableMemoryProvider hostAvailableMemory,
+    bool allowWarningGrowth)
     : backend_(backend), limitBytes_(limitBytes),
       hostReserveBytes_(hostReserveBytes),
+      allowWarningGrowth_(allowWarningGrowth),
       hostAvailableMemory_(std::move(hostAvailableMemory)) {
   if (!limitBytes_) {
     throw std::invalid_argument("memory governor limit must be positive");
@@ -207,9 +209,11 @@ MemoryGovernor::tryReserve(uint64_t bytes, metal::AllocationFailure *failure) {
       hostAvailable, reservedBytes_);
   bool engineFits = !overflows && observed <= limitBytes_ &&
                     requested <= limitBytes_ - observed;
-  bool hostFits =
-      hostHeadroomBytes(hostAvailable, requested) >= kHostWarningMarginBytes;
-  if (!engineFits || !hostFits || hostConstrained_ ||
+  const uint64_t hostHeadroom = hostHeadroomBytes(hostAvailable, requested);
+  const bool hostFits = allowWarningGrowth_
+      ? hostHeadroom > 0
+      : hostHeadroom >= kHostWarningMarginBytes;
+  if (!engineFits || !hostFits || (!allowWarningGrowth_ && hostConstrained_) ||
       pressure == MemoryPressure::Critical) {
     if (failure)
       *failure = !engineFits ? metal::AllocationFailure::EngineBudget
@@ -260,7 +264,9 @@ MemoryGovernorSnapshot MemoryGovernor::snapshot() const noexcept {
   MemoryPressure effectivePressure = updateEffectivePressure(
       hostAvailable, reservedBytes_);
   bool hostGrowthAllowed = effectivePressure != MemoryPressure::Critical &&
-      !hostConstrained_ && hostHeadroom >= kHostWarningMarginBytes;
+      (allowWarningGrowth_
+           ? hostHeadroom > 0
+           : !hostConstrained_ && hostHeadroom >= kHostWarningMarginBytes);
   bool growthAllowed = hostGrowthAllowed && used < limitBytes_;
   return {
       limitBytes_,

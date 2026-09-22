@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <iostream>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -441,6 +442,7 @@ void NativeRuntime::requestError(uint64_t requestId, std::string code,
 }
 
 void NativeRuntime::engineError(std::string code, std::string message) {
+  std::cerr << "engine error: " << code << ": " << message << '\n';
   send(protocol::ErrorEvent{protocol::FailureClass::EngineUnhealthy, 0, false,
                             std::move(code), std::move(message)});
   engineHealthy_ = false;

@@ -214,13 +214,19 @@ void testRuntimeCacheNamespaceBindsIdentityOnce() {
   const engine::RuntimeCacheIdentity buildChanged =
       engine::makeRuntimeCacheIdentity(combinedA, targetA, "build-b",
                                        q8Layout);
+  const engine::RuntimeCacheIdentity tq4Changed =
+      engine::makeRuntimeCacheIdentity(combinedA, targetA, "build-a",
+                                       q8Layout, true);
   require(first.cacheNamespace == same.cacheNamespace &&
               first.namespaceSha256 == same.namespaceSha256,
           "runtime cache namespace is not deterministic");
   require(first.cacheNamespace != modelChanged.cacheNamespace &&
               first.cacheNamespace != targetChanged.cacheNamespace &&
-              first.cacheNamespace != buildChanged.cacheNamespace,
-          "runtime cache namespace omitted model, layout, or build identity");
+              first.cacheNamespace != buildChanged.cacheNamespace &&
+              first.cacheNamespace != tq4Changed.cacheNamespace,
+          "runtime cache namespace omitted model, layout, build, or KV format identity");
+  require(!first.tq4Kv && tq4Changed.tq4Kv,
+          "runtime cache identity lost its KV format");
   require(kv::matchesQ8Layout(first.q8Layout, q8Layout) &&
               first.q8Layout.modelArtifactSha256 !=
                   targetChanged.q8Layout.modelArtifactSha256,

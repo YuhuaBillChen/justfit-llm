@@ -152,6 +152,29 @@ void testSchedulingProbeDoesNotChangeCachePolicy() {
           "scheduling probe refreshed the oldest state's eviction order");
 }
 
+void testSuspendedStateFreeKvBecomesReusableBacking() {
+  CacheFixture fixture;
+  const auto before = fixture.cache.snapshot();
+  require(before.kvCache.blocks == 4 && before.pool.pagesResident == 4 &&
+              before.pool.pagesFree == 0,
+          "fixture did not begin with a resident KV-only prefix");
+
+  require(fixture.cache.reclaimStateFreeKvForReuse() == 4,
+          "state-free prefix was not fully recycled");
+  const auto recycled = fixture.cache.snapshot();
+  require(recycled.kvCache.blocks == 0 && recycled.pool.pagesResident == 4 &&
+              recycled.pool.pagesFree == 4,
+          "KV-only prefix did not become reusable resident backing");
+
+  fixture.cache.beginRequest(2);
+  require(fixture.cache.ensureTokens(2, 128).granted(),
+          "replay could not reuse recycled prefix backing");
+  const auto replay = fixture.cache.snapshot();
+  require(replay.pool.pagesResident == 4 && replay.pool.pagesActive == 4,
+          "replay allocated duplicate backing instead of reusing pages");
+  fixture.cache.endRequest(2);
+}
+
 void testCacheLookupAndOneTokenReplay() {
   CacheFixture fixture;
   fixture.publish(0);
@@ -621,6 +644,7 @@ int main() {
     testCheckpointPressurePreservesHotPrefix();
     testLogicalKvPressureStillReclaimsPages();
     testSchedulingProbeDoesNotChangeCachePolicy();
+    testSuspendedStateFreeKvBecomesReusableBacking();
     testCacheLookupAndOneTokenReplay();
     testPage31Page32Page33Backoff();
     testLazyJunctionMaterialization();

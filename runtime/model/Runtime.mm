@@ -193,9 +193,16 @@ struct Runtime::Impl {
   };
 
   struct Request final {
+    struct DeferredDraftSpan final {
+      uint32_t compactRow = 0;
+      uint32_t rows = 0;
+      uint32_t startPosition = 0;
+    };
+
     uint64_t id = 0;
     uint32_t slot = 0;
     bool resident = false;
+    bool phaseManaged = false;
     bool promptComplete = false;
     // Rebuild state from already-emitted tokens without sampling an initial
     // anchor, consuming RNG, or replaying output to the caller.
@@ -225,6 +232,10 @@ struct Runtime::Impl {
     bool draftContextValid = false;
     uint64_t draftContextThrough = 0;
     std::optional<DraftContextPlan> draftContextPlan;
+    std::vector<uint16_t> deferredDraftHidden;
+    std::vector<float> deferredDraftRopeCos;
+    std::vector<float> deferredDraftRopeSin;
+    std::vector<DeferredDraftSpan> deferredDraftSpans;
     std::vector<ImageState> images;
   };
 
@@ -248,10 +259,12 @@ struct Runtime::Impl {
 
   MetalBackend &backend;
   metal::AllocationAdmission admitAllocation;
-  const ModelPackage &package;
+  ModelPackage &package;
+  const std::filesystem::path modelRoot;
   const RuntimeGeometry geometry;
   const ops::ExecutionPlans &operators;
-  kv::Q8PageStorage &kvPages;
+  kv::Q8PageStorage *kvPages = nullptr;
+  kv::TQ4PageStorage *tq4Pages = nullptr;
   QwenStateStorage &states;
   std::unique_ptr<PrefillArena> prefillArena;
   std::unique_ptr<DecodeArena> decodeArena;
@@ -275,38 +288,259 @@ struct Runtime::Impl {
   uint32_t maximumImagePatches = 0;
   uint64_t pipelineReserveBytes = 0;
   uint64_t runtimeOverheadReserveBytes = 0;
+  bool justFitPhaseResidency = false;
+  bool justFitTq4Kv = false;
   std::array<PageTableBinding, kLaneCount> pageTableBindings{};
   ModelTelemetry counters;
   ops::Sampling sampling;
   QwenTarget targetModel;
-  DFlashDraft draftModel;
+  uint64_t draftWeightBytes = 0;
+  std::unique_ptr<DFlashDraft> draftModel;
   explicit Impl(RuntimeContext value)
       : backend(value.backend),
         admitAllocation(std::move(value.admitAllocation)),
-        package(value.package), geometry(RuntimeGeometry::from(value.package)),
+        package(value.package), modelRoot(std::move(value.modelRoot)),
+        geometry(RuntimeGeometry::from(value.package)),
         operators(value.operators),
-        kvPages(value.kvPages),
+        kvPages(value.kvPages), tq4Pages(value.tq4Pages),
         states(requireQwenStateStorage(value.stateStorage)),
         maximumImagePatches(value.maximumImagePatches),
         pipelineReserveBytes(value.pipelineReserveBytes),
         runtimeOverheadReserveBytes(value.runtimeOverheadReserveBytes),
+        justFitPhaseResidency(value.justFitPhaseResidency),
+        justFitTq4Kv(value.justFitTq4Kv),
         sampling(value.backend, geometry.target.vocabularySize, kDecodeRows),
         targetModel(std::visit(
                         [&](const auto &weights) {
                           return QwenTarget(weights, value.backend, operators);
                         },
                         value.package.target)),
-        draftModel(value.package.draft, value.backend, operators) {
+        draftWeightBytes(value.package.draft.actualAllocatedBytes),
+        draftModel(std::make_unique<DFlashDraft>(
+            value.package.draft, value.backend, operators)) {
     if (!admitAllocation)
       throw std::invalid_argument(
           "model runtime requires allocation admission");
-    if (states.layout() != package.stateLayout() ||
-        kvPages.layout() != package.targetKvLayout()) {
+    if ((!kvPages == !tq4Pages) || states.layout() != package.stateLayout() ||
+        (kvPages && kvPages->layout() != package.targetKvLayout()) ||
+        (tq4Pages &&
+         tq4Pages->layout() !=
+             kv::TQ4Layout{package.targetKvLayout().attentionLayers,
+                           package.targetKvLayout().kvHeads,
+                           package.targetKvLayout().headDimension})) {
       throw std::invalid_argument(
           "model runtime resources do not match the loaded package");
     }
-    prefillArena = std::make_unique<PrefillArena>(backend, geometry, operators);
+    prefillArena = std::make_unique<PrefillArena>(backend, geometry, operators,
+                                                  justFitTq4Kv);
     decodeArena = std::make_unique<DecodeArena>(backend, geometry, operators);
+  }
+
+  [[nodiscard]] kv::Backing &kvBacking() const noexcept {
+    return justFitTq4Kv ? static_cast<kv::Backing &>(*tq4Pages)
+                        : static_cast<kv::Backing &>(*kvPages);
+  }
+
+  [[nodiscard]] uint64_t kvActualAllocatedBytes() const noexcept {
+    return justFitTq4Kv ? tq4Pages->actualAllocatedBytes()
+                        : kvPages->actualAllocatedBytes();
+  }
+
+  void ensureDraftResident() {
+    if (draftModel)
+      return;
+    // The immutable memory plan already charges the complete draft mapping as
+    // fixed runtime memory. Remapping that file-backed slot must not reserve
+    // the same bytes a second time from the dynamic/host-growth governor.
+    DFlashDraftWeights loaded = loadDFlashDraftWeights(
+        backend, modelRoot / "draft", package.descriptor.draft);
+    if (loaded.actualAllocatedBytes != draftWeightBytes) {
+      throw std::runtime_error(
+          "rematerialized DFlash draft allocation changed");
+    }
+    package.draft = std::move(loaded);
+    draftModel =
+        std::make_unique<DFlashDraft>(package.draft, backend, operators);
+    ++counters.draftLoadCount;
+  }
+
+  void ensurePrefillResident() {
+    if (!requests.empty()) {
+      throw std::logic_error(
+          "phase-managed prefill cannot begin beside an active request");
+    }
+    // The arena is created during bootstrap, so its presence does not mean
+    // prefill residency has been established. Retire the idle draft before
+    // the first cold request as well as on later decode-to-prefill switches.
+    static_cast<void>(releaseIdleDraft());
+    if (prefillArena)
+      return;
+    prefillArena = std::make_unique<PrefillArena>(backend, geometry, operators,
+                                                  justFitTq4Kv);
+  }
+
+  uint64_t releaseIdleDraft() noexcept {
+    if (!justFitPhaseResidency || !draftModel)
+      return 0;
+    const bool inUse = std::any_of(
+        requests.begin(), requests.end(), [](const auto &item) {
+          const Request &entry = item.second;
+          return entry.promptComplete || entry.draftContextValid;
+        });
+    if (inUse)
+      return 0;
+    draftModel.reset();
+    package.draft = {};
+    static_cast<void>(backend.refreshMemoryStats());
+    ++counters.draftUnloadCount;
+    return draftWeightBytes;
+  }
+
+  void stashDeferredDraftContext(Request &entry,
+                                 const DispatchDraftCapturePlan &captures,
+                                 uint32_t capturedRows) {
+    if (!capturedRows)
+      return;
+    if (!entry.phaseManaged || !prefillArena) {
+      throw std::logic_error("deferred draft capture has no prefill arena");
+    }
+    const uint32_t hiddenWidth = geometry.draft.targetHiddenSize;
+    const uint32_t rotaryPairs = geometry.draftState.headDimension / 2;
+    const uint64_t oldRows = entry.deferredDraftHidden.size() / hiddenWidth;
+    const auto *hidden = contents<uint16_t>(
+        prefillArena->get(PrefillTensor::Captured),
+        "deferred draft target hidden");
+    const auto *ropeCos = contents<float>(
+        prefillArena->get(PrefillTensor::DraftRopeCos),
+        "deferred draft rope cosine");
+    const auto *ropeSin = contents<float>(
+        prefillArena->get(PrefillTensor::DraftRopeSin),
+        "deferred draft rope sine");
+    entry.deferredDraftHidden.insert(
+        entry.deferredDraftHidden.end(), hidden,
+        hidden + uint64_t{capturedRows} * hiddenWidth);
+    entry.deferredDraftRopeCos.insert(
+        entry.deferredDraftRopeCos.end(), ropeCos,
+        ropeCos + uint64_t{capturedRows} * rotaryPairs);
+    entry.deferredDraftRopeSin.insert(
+        entry.deferredDraftRopeSin.end(), ropeSin,
+        ropeSin + uint64_t{capturedRows} * rotaryPairs);
+    for (const DispatchDraftCaptureSpan &capture : captures) {
+      entry.deferredDraftSpans.push_back(
+          {static_cast<uint32_t>(oldRows) + capture.compactDestinationRow,
+           capture.absoluteEnd - capture.absoluteBegin,
+           capture.absoluteBegin});
+    }
+  }
+
+  CommandTiming materializeDeferredDraftContext(Request &entry) {
+    const uint32_t hiddenWidth = geometry.draft.targetHiddenSize;
+    const uint32_t rotaryPairs = geometry.draftState.headDimension / 2;
+    if (entry.deferredDraftHidden.empty() ||
+        entry.deferredDraftHidden.size() % hiddenWidth ||
+        entry.deferredDraftRopeCos.size() % rotaryPairs ||
+        entry.deferredDraftRopeSin.size() !=
+            entry.deferredDraftRopeCos.size()) {
+      throw std::logic_error("deferred draft context is incomplete");
+    }
+    const uint32_t totalRows = static_cast<uint32_t>(
+        entry.deferredDraftHidden.size() / hiddenWidth);
+    uint32_t rows = 0;
+    for (const Request::DeferredDraftSpan &span :
+         entry.deferredDraftSpans) {
+      if (!span.rows || span.rows > kPrefillRows ||
+          uint64_t{span.compactRow} + span.rows > totalRows) {
+        throw std::logic_error("deferred draft span is invalid");
+      }
+      rows = std::max(rows, span.rows);
+    }
+    if (!totalRows || !rows ||
+        entry.deferredDraftRopeCos.size() !=
+            uint64_t{totalRows} * rotaryPairs) {
+      throw std::logic_error("deferred draft context row count is invalid");
+    }
+    constexpr uint32_t q4PrefillTileRows = 32;
+    const uint32_t storageRows =
+        ((rows + q4PrefillTileRows - 1) / q4PrefillTileRows) *
+        q4PrefillTileRows;
+
+    // The target-prefill command is complete and all required draft inputs
+    // have been copied to host vectors. Retire the large target arena before
+    // remapping the draft weights, then materialize through exact-size scratch.
+    prefillArena.reset();
+    static_cast<void>(backend.refreshMemoryStats());
+    ensureDraftResident();
+
+    struct Slice final {
+      uint64_t offset = 0;
+      uint64_t bytes = 0;
+    };
+    uint64_t cursor = 0;
+    auto reserve = [&](uint64_t bytes) {
+      Slice result{cursor, bytes};
+      cursor = checkedAdd(cursor, alignArena(bytes),
+                          "deferred draft materialization arena");
+      return result;
+    };
+    const Slice captured = reserve(bytesFor<uint16_t>(
+        uint64_t{storageRows} * geometry.draft.targetHiddenSize));
+    const Slice sums = reserve(bytesFor<float>(
+        uint64_t{storageRows} * geometry.projectionSumsWidth()));
+    const Slice projected = reserve(bytesFor<uint16_t>(
+        uint64_t{storageRows} * geometry.draft.hiddenSize));
+    const Slice hidden = reserve(bytesFor<uint16_t>(
+        uint64_t{storageRows} * geometry.draft.hiddenSize));
+    const Slice qkv = reserve(bytesFor<uint16_t>(
+        uint64_t{storageRows} * geometry.draft.qkvSize));
+    const Slice ropeCos =
+        reserve(bytesFor<float>(uint64_t{rows} * rotaryPairs));
+    const Slice ropeSin =
+        reserve(bytesFor<float>(uint64_t{rows} * rotaryPairs));
+    MetalBuffer base = backend.allocateBuffer(
+        cursor, BufferStorage::Shared, "justfit-draft-context");
+    const auto view = [&](Slice slice) {
+      return backend.view(base, slice.offset, slice.bytes);
+    };
+    MetalBuffer capturedBuffer = view(captured);
+    MetalBuffer ropeCosBuffer = view(ropeCos);
+    MetalBuffer ropeSinBuffer = view(ropeSin);
+    const QwenSlotBuffers &slot = states.buffers(entry.slot);
+    CommandTiming timing;
+    for (const Request::DeferredDraftSpan &source :
+         entry.deferredDraftSpans) {
+      std::memset(base.contents(), 0, cursor);
+      std::memcpy(
+          capturedBuffer.contents(),
+          entry.deferredDraftHidden.data() +
+              uint64_t{source.compactRow} * hiddenWidth,
+          bytesFor<uint16_t>(uint64_t{source.rows} * hiddenWidth));
+      std::memcpy(
+          ropeCosBuffer.contents(),
+          entry.deferredDraftRopeCos.data() +
+              uint64_t{source.compactRow} * rotaryPairs,
+          bytesFor<float>(uint64_t{source.rows} * rotaryPairs));
+      std::memcpy(
+          ropeSinBuffer.contents(),
+          entry.deferredDraftRopeSin.data() +
+              uint64_t{source.compactRow} * rotaryPairs,
+          bytesFor<float>(uint64_t{source.rows} * rotaryPairs));
+      const DFlashPrefillSpan span{0, source.rows, source.startPosition,
+                                   slot.draft};
+      CommandGraph graph;
+      draftModel->addContextPrefill(
+          graph,
+          {capturedBuffer, view(sums), view(projected), view(hidden), view(qkv),
+           ropeCosBuffer, ropeSinBuffer},
+          source.rows, std::span<const DFlashPrefillSpan>(&span, 1));
+      const CommandTiming part = backend.submitCommand(graph.dispatches());
+      timing.gpuSeconds += part.gpuSeconds;
+      timing.wallSeconds += part.wallSeconds;
+    }
+    entry.deferredDraftHidden.clear();
+    entry.deferredDraftRopeCos.clear();
+    entry.deferredDraftRopeSin.clear();
+    entry.deferredDraftSpans.clear();
+    return timing;
   }
 
   Request &request(uint64_t id) {
@@ -442,6 +676,10 @@ struct Runtime::Impl {
   metal::AllocationResult stageImages(const ModelRequest &request) {
     if (request.images.empty() || stagedImages.contains(request.id))
       return true;
+    if (justFitPhaseResidency) {
+      throw std::invalid_argument(
+          "JustFit phase-residency PoC currently supports text-only requests");
+    }
     std::vector<ImageState> staged;
     staged.reserve(request.images.size());
     uint64_t bytes = 0;
@@ -571,7 +809,7 @@ struct Runtime::Impl {
     add(states.actualAllocatedBytes(), "warmup state slots");
     add(prefillArena->bytes(), "warmup prefill arena");
     add(decodeArena->bytes(), "warmup decode arena");
-    add(kvPages.actualAllocatedBytes(), "warmup Q8 pool");
+    add(kvActualAllocatedBytes(), "warmup KV pool");
     add(pipelineReserveBytes, "warmup pipeline reserve");
     add(runtimeOverheadReserveBytes, "warmup runtime reserve");
     return result;
@@ -611,8 +849,8 @@ struct Runtime::Impl {
                      MetalBuffer draftSin) const {
     ops::RoPE::addTables(
         graph, std::move(targetPositions), std::move(draftPositions),
-        prefillArena->get(PrefillTensor::TargetInverseFrequencies),
-        prefillArena->get(PrefillTensor::DraftInverseFrequencies),
+        decodeArena->get(0, DecodeTensor::TargetInverseFrequencies),
+        decodeArena->get(0, DecodeTensor::DraftInverseFrequencies),
         std::move(targetCos), std::move(targetSin), std::move(draftCos),
         std::move(draftSin), {targetRows, draftRows}, kPrefillRows);
   }
@@ -770,7 +1008,8 @@ struct Runtime::Impl {
                                   uint32_t chunkTokens, uint32_t chunkStride,
                                   std::span<const uint32_t> pages) const {
     return ops::PagedAttention::prefillParams(
-        logicalPosition, chunkTokens, chunkStride, pages, kvPages.pageCount());
+        logicalPosition, chunkTokens, chunkStride, pages,
+        kvBacking().pageCount());
   }
 
   struct PackedPrefillSequence final {
@@ -896,6 +1135,7 @@ struct Runtime::Impl {
                              const PackedPrefillBatch &batch) {
     if (!batch.capturedRows)
       return;
+    ensureDraftResident();
     auto p = [&](PrefillTensor tensor) { return prefillArena->get(tensor); };
     std::array<DFlashPrefillSpan, kLaneCount * 2> spans{};
     uint32_t spanCount = 0;
@@ -909,7 +1149,7 @@ struct Runtime::Impl {
         span.ring = slot.draft;
       }
     }
-    draftModel.addContextPrefill(
+    draftModel->addContextPrefill(
         graph,
         {p(PrefillTensor::Captured), p(PrefillTensor::ProjectionSums),
          p(PrefillTensor::ContextProjected), p(PrefillTensor::ContextHidden),
@@ -1016,6 +1256,8 @@ struct Runtime::Impl {
     buffers.ropeSin = p(PrefillTensor::RopeSin);
     buffers.chunkKeys = p(PrefillTensor::ChunkKeys);
     buffers.chunkValues = p(PrefillTensor::ChunkValues);
+    buffers.tq4StagedKeys = p(PrefillTensor::TQ4StagedKeys);
+    buffers.tq4StagedValues = p(PrefillTensor::TQ4StagedValues);
     buffers.selectedExperts = p(PrefillTensor::MoeSelectedExperts);
     buffers.routingWeights = p(PrefillTensor::MoeRoutingWeights);
     buffers.tileDescriptors = p(PrefillTensor::MoeTileDescriptors);
@@ -1025,15 +1267,29 @@ struct Runtime::Impl {
     buffers.groupedInput = p(PrefillTensor::MoeGroupedInput);
     buffers.expertIntermediate = p(PrefillTensor::MoeExpertIntermediate);
     buffers.expertOutput = p(PrefillTensor::MoeExpertOutput);
-    std::vector<kv::Q8LayerStorage> kvLayers(
-        geometry.target.kvLayout.attentionLayers);
-    for (uint32_t layer = 0; layer < kvLayers.size(); ++layer)
-      kvLayers[layer] = kvPages.layer(layer);
-    targetModel.addPrefill(
-        graph, std::move(buffers),
-        std::span(modelSequences).first(batch.sequences.size()), batch.rows,
-        kvLayers);
-    addPackedDraftContext(graph, batch);
+    if (justFitTq4Kv) {
+      std::vector<kv::TQ4LayerStorage> kvLayers(
+          geometry.target.kvLayout.attentionLayers);
+      for (uint32_t layer = 0; layer < kvLayers.size(); ++layer)
+        kvLayers[layer] = tq4Pages->layer(layer);
+      targetModel.addPrefill(
+          graph, std::move(buffers),
+          std::span(modelSequences).first(batch.sequences.size()), batch.rows,
+          kvLayers);
+    } else {
+      std::vector<kv::Q8LayerStorage> kvLayers(
+          geometry.target.kvLayout.attentionLayers);
+      for (uint32_t layer = 0; layer < kvLayers.size(); ++layer)
+        kvLayers[layer] = kvPages->layer(layer);
+      targetModel.addPrefill(
+          graph, std::move(buffers),
+          std::span(modelSequences).first(batch.sequences.size()), batch.rows,
+          kvLayers);
+    }
+    const bool deferDraft = batch.sequences.size() == 1 &&
+                            batch.sequences.front().entry->phaseManaged;
+    if (!deferDraft)
+      addPackedDraftContext(graph, batch);
 
     for (const PackedPrefillSequence &sequence : batch.sequences) {
       Request &entry = *sequence.entry;
@@ -1172,7 +1428,7 @@ struct Runtime::Impl {
     buffers.ropeSin = d(DecodeTensor::DraftRopeSin);
     buffers.gateScratch = decodeArena->gateScratch();
     bindDraftRings(entries, buffers.persistentKeys, buffers.persistentValues);
-    draftModel.addDecode(graph, std::move(buffers),
+    draftModel->addDecode(graph, std::move(buffers),
                          targetModel.vocabularyProjection(), cacheLengths,
                          lanes, stats);
     std::array<uint32_t, kLaneCount> anchors{};
@@ -1184,7 +1440,7 @@ struct Runtime::Impl {
       anchors[lane] = *entry.pendingToken;
       policies[lane] = samplingPolicy(entry);
     }
-    draftModel.addSelection(
+    draftModel->addSelection(
         graph,
         {d(DecodeTensor::Logits), d(DecodeTensor::TopPartialIds),
          d(DecodeTensor::TopPartialValues), d(DecodeTensor::Candidates),
@@ -1288,16 +1544,25 @@ struct Runtime::Impl {
       gdnBeta[layer] = decodeArena->gdnBatchSlice(
           DecodeTensor::VerifyBetaBase, layer, lanes);
     }
-    std::vector<kv::Q8LayerStorage> kvLayers(attentionLayers);
     for (uint32_t layer = 0; layer < attentionLayers; ++layer) {
       chunkKeys[layer] = decodeArena->attentionBatchSlice(
           DecodeTensor::ChunkKeysBase, layer, lanes);
       chunkValues[layer] = decodeArena->attentionBatchSlice(
           DecodeTensor::ChunkValuesBase, layer, lanes);
-      kvLayers[layer] = kvPages.layer(layer);
     }
-    targetModel.addVerify(graph, std::move(buffers), kvLayers, q8, verify,
-                          lanes, stats);
+    if (justFitTq4Kv) {
+      std::vector<kv::TQ4LayerStorage> kvLayers(attentionLayers);
+      for (uint32_t layer = 0; layer < attentionLayers; ++layer)
+        kvLayers[layer] = tq4Pages->layer(layer);
+      targetModel.addVerify(graph, std::move(buffers), kvLayers, q8, verify,
+                            lanes, stats);
+    } else {
+      std::vector<kv::Q8LayerStorage> kvLayers(attentionLayers);
+      for (uint32_t layer = 0; layer < attentionLayers; ++layer)
+        kvLayers[layer] = kvPages->layer(layer);
+      targetModel.addVerify(graph, std::move(buffers), kvLayers, q8, verify,
+                            lanes, stats);
+    }
   }
 
   void encodeTargetVerifyBatchPolicy(CommandGraph &graph,
@@ -1355,7 +1620,7 @@ struct Runtime::Impl {
     buffers.ropeSin = d(DecodeTensor::DraftRopeSin);
     buffers.retainedCounts = d(DecodeTensor::RetainedCount);
     bindDraftRings(entries, buffers.persistentKeys, buffers.persistentValues);
-    draftModel.addContextCommit(graph, std::move(buffers), startPositions,
+    draftModel->addContextCommit(graph, std::move(buffers), startPositions,
                                 lanes, stats);
   }
 
@@ -1785,6 +2050,10 @@ void Runtime::suspend(uint64_t requestId) {
   impl_->pageTableBindings[entry.slot] = {};
   entry.images.clear();
   entry.draftContextPlan.reset();
+  entry.deferredDraftHidden.clear();
+  entry.deferredDraftRopeCos.clear();
+  entry.deferredDraftRopeSin.clear();
+  entry.deferredDraftSpans.clear();
   entry.draftContextValid = false;
   entry.draftContextThrough = 0;
   entry.replayingGeneration |= entry.promptComplete;
@@ -1828,8 +2097,19 @@ metal::AllocationResult Runtime::beginAt(const ModelRequest &request, uint32_t s
   if (impl_->requests.contains(request.id)) {
     throw std::logic_error("request is already active");
   }
+  const bool phaseManaged =
+      impl_->justFitPhaseResidency &&
+      request.id < std::numeric_limits<uint64_t>::max() - 1000;
+  if (phaseManaged) {
+    if (!impl_->requests.empty()) {
+      return metal::AllocationResult{
+          metal::AllocationFailure::EngineBudget};
+    }
+    impl_->ensurePrefillResident();
+  }
   Impl::Request entry;
   entry.id = request.id;
+  entry.phaseManaged = phaseManaged;
   entry.promptTokens = static_cast<uint32_t>(request.prompt.size());
   entry.maxNewTokens = request.maxNewTokens;
   entry.cohort = request.cohort;
@@ -1975,6 +2255,17 @@ Runtime::prefillAsync(const BatchPlan &plan,
   if (plan.decodeStage != DecodeStage::Regular) {
     throw std::invalid_argument("Qwen prefill cannot resume a mask plan");
   }
+  const uint32_t phaseManagedRequests = static_cast<uint32_t>(std::count_if(
+      impl_->requests.begin(), impl_->requests.end(), [](const auto &item) {
+        return item.second.phaseManaged;
+      }));
+  if (phaseManagedRequests && items.size() != 1) {
+    throw std::invalid_argument(
+        "JustFit native phase-residency PoC supports one prefill lane");
+  }
+  if (!impl_->prefillArena) {
+    throw std::logic_error("prefill arena is not resident");
+  }
 
   std::array<Impl::Request *, kLaneCount> entries{};
   CommandGraph graph;
@@ -2013,6 +2304,9 @@ Runtime::prefillAsync(const BatchPlan &plan,
       const ModelBatchItem &item = items[lane];
       const auto captures = Impl::activeDraftCaptures(entry, item);
       const uint32_t capturedRows = Impl::captureRows(captures);
+      if (entry.phaseManaged) {
+        impl->stashDeferredDraftContext(entry, captures, capturedRows);
+      }
       uint32_t activeRows = 0;
       uint32_t materializationRows = 0;
       for (const auto &capture : captures) {
@@ -2036,8 +2330,14 @@ Runtime::prefillAsync(const BatchPlan &plan,
         entry.draftContextValid = true;
         entry.draftContextThrough = capture.absoluteEnd;
       }
-      impl->states.swapParity(entry.slot);
       uint64_t nextLength = item.logicalPosition + item.tokenCount;
+      if (entry.phaseManaged && nextLength == entry.promptTokens) {
+        const CommandTiming draftTiming =
+            impl->materializeDeferredDraftContext(entry);
+        timing.gpuSeconds += draftTiming.gpuSeconds;
+        timing.wallSeconds += draftTiming.wallSeconds;
+      }
+      impl->states.swapParity(entry.slot);
       QwenLogicalLengths lengths = impl->states.metadata(entry.slot).lengths;
       lengths.targetTokens = nextLength;
       for (const auto &capture : captures) {
@@ -2117,6 +2417,7 @@ Runtime::decodeAsync(const BatchPlan &plan,
                      std::span<const ModelBatchItem> items,
                      std::function<void()> completion) {
   validatePlan(plan, items, WorkKind::Decode);
+  impl_->ensureDraftResident();
   const bool constrained = plan.cohort == BatchCohort::Constrained;
   if (plan.decodeStage != DecodeStage::Regular && !constrained) {
     throw std::invalid_argument(
@@ -2326,6 +2627,8 @@ uint64_t Runtime::reclaimIdleState() noexcept {
     released += impl_->vision->arenaBytes();
     impl_->vision.reset();
   }
+  if (!released)
+    released += impl_->releaseIdleDraft();
   return released;
 }
 
@@ -2390,17 +2693,17 @@ WarmupStepResult warmupResult(uint64_t estimatedPeakBytes, double wallSeconds,
   return {true, estimatedPeakBytes, std::move(detail), wallSeconds, {}};
 }
 
-std::vector<uint32_t> warmupPages(kv::Q8PageStorage &storage, uint32_t first,
+std::vector<uint32_t> warmupPages(kv::Backing &storage, uint32_t first,
                                   uint32_t count) {
   if (!count || uint64_t{first} + count > storage.pageCount()) {
-    throw std::invalid_argument("warmup Q8 page range is unavailable");
+    throw std::invalid_argument("warmup KV page range is unavailable");
   }
   std::vector<uint32_t> result(count);
   for (uint32_t index = 0; index < count; ++index) {
     const uint32_t page = first + index;
     if (auto admission = storage.ensureResident(page); !admission) {
       throw metal::MetalAllocationError(
-          std::string("warmup could not reserve Q8 page backing: ") +
+          std::string("warmup could not reserve KV page backing: ") +
               metal::allocationFailureName(admission.failure), admission.failure);
     }
     result[index] = page;
@@ -2438,7 +2741,8 @@ WarmupStepResult Runtime::warmupPrefill(uint32_t rows) {
   beginColdRequest(request, 0);
   try {
     std::vector<uint32_t> pages = warmupPages(
-        impl_->kvPages, 0, (rows + kv::kPageTokens - 1) / kv::kPageTokens);
+        impl_->kvBacking(), 0,
+        (rows + kv::kPageTokens - 1) / kv::kPageTokens);
     BatchPlan plan{WorkKind::Prefill,
                    BatchCohort::Greedy,
                    {{id, rows}},
@@ -2486,7 +2790,7 @@ WarmupStepResult Runtime::warmupDecodeBatch(uint32_t width) {
       request.prompt = warmupPrompt;
       request.maxNewTokens = 16;
       beginColdRequest(request, slotOrder[lane]);
-      pages[lane] = warmupPages(impl_->kvPages, 5 + lane, 1);
+      pages[lane] = warmupPages(impl_->kvBacking(), 5 + lane, 1);
       BatchPlan prefillPlan{WorkKind::Prefill,
                             BatchCohort::Greedy,
                             {{request.id, 1}},
@@ -2570,7 +2874,7 @@ WarmupStepResult Runtime::warmupDraftVerifyCommit() {
   request.maxNewTokens = 16;
   beginColdRequest(request, 0);
   try {
-    std::vector<uint32_t> pages = warmupPages(impl_->kvPages, 9, 1);
+    std::vector<uint32_t> pages = warmupPages(impl_->kvBacking(), 9, 1);
     BatchPlan prefillPlan{WorkKind::Prefill,
                           BatchCohort::Greedy,
                           {{id, 1}},
@@ -2618,7 +2922,7 @@ WarmupStepResult Runtime::warmupCompositeStateRestore() {
   double wallSeconds = 0.0;
   beginColdRequest(request, 0);
   try {
-    if (impl_->kvPages.pageCount() <= 12) {
+    if (impl_->kvBacking().pageCount() <= 12) {
       throw std::runtime_error(
           "historical prefix warmup requires at least 13 Q8 pages");
     }
@@ -2698,7 +3002,8 @@ WarmupStepResult Runtime::warmupCompositeStateRestore() {
 }
 
 ModelMemoryActual Runtime::actualRuntimeMemory() const {
-  return {impl_->states.actualAllocatedBytes(), impl_->prefillArena->bytes(),
+  return {impl_->states.actualAllocatedBytes(),
+          impl_->prefillArena ? impl_->prefillArena->bytes() : 0,
           impl_->decodeArena->bytes()};
 }
 
@@ -2706,19 +3011,22 @@ ModelTelemetry Runtime::telemetry() const noexcept {
   ModelTelemetry result = impl_->counters;
   result.stateResidentBytes = impl_->states.actualAllocatedBytes();
   result.warmIdleStateCells = impl_->states.idleCells();
+  result.draftWeightsResident = static_cast<bool>(impl_->draftModel);
+  result.draftWeightBytes = impl_->draftWeightBytes;
   return result;
 }
 
 ModelMemoryPlan plannedRuntimeMemory(const DeviceCapabilities &device,
                                      const ModelPackage &package,
-                                     const ops::ExecutionPlans &operators) {
+                                     const ops::ExecutionPlans &operators,
+                                     bool tq4Kv) {
   requireCompatibleModelPackage(package);
   if (device.appleGpuFamily < DeviceCapabilities::kMinimumAppleGpuFamily) {
     throw std::invalid_argument("model runtime requires Apple tensor BF16");
   }
   const RuntimeGeometry geometry = RuntimeGeometry::from(package);
   return {package.stateLayout().activeCellBytes(),
-          plannedPrefillBytes(geometry, operators),
+          plannedPrefillBytes(geometry, operators, tq4Kv),
           plannedDecodeBytes(geometry, operators), kPipelineReserveBytes,
           kRuntimeOverheadReserveBytes};
 }

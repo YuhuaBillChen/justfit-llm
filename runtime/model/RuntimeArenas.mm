@@ -6,7 +6,7 @@ namespace splash::model {
 
 std::array<uint64_t, prefillTensorCount>
 prefillTensorBytes(const RuntimeGeometry &geometry,
-                   const ops::ExecutionPlans &operators) {
+                   const ops::ExecutionPlans &operators, bool tq4Kv) {
   std::array<uint64_t, prefillTensorCount> result{};
   auto put = [&](PrefillTensor tensor, uint64_t bytes) {
     result[static_cast<uint32_t>(tensor)] = bytes;
@@ -113,6 +113,13 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
       bytesFor<uint16_t>(uint64_t{geometry.target.attentionKvHeads} *
                          kPackedAttentionRows *
                          geometry.target.attentionHeadDimension));
+  if (tq4Kv) {
+    const uint64_t stagedHeadBytes =
+        bytesFor<uint16_t>(uint64_t{kv::kMaximumLogicalTokens} *
+                           geometry.target.attentionHeadDimension);
+    put(PrefillTensor::TQ4StagedKeys, stagedHeadBytes);
+    put(PrefillTensor::TQ4StagedValues, stagedHeadBytes);
+  }
   if (geometry.target.ffnKind == QwenFfnKind::SparseMoe) {
     const ops::MoeWorkspace workspace =
         operators.moePrefillWorkspace(geometry.target.moe, kPrefillRows);
@@ -130,9 +137,9 @@ prefillTensorBytes(const RuntimeGeometry &geometry,
 }
 
 uint64_t plannedPrefillBytes(const RuntimeGeometry &geometry,
-                            const ops::ExecutionPlans &operators) {
+                            const ops::ExecutionPlans &operators, bool tq4Kv) {
   uint64_t bytes = 0;
-  for (uint64_t value : prefillTensorBytes(geometry, operators)) {
+  for (uint64_t value : prefillTensorBytes(geometry, operators, tq4Kv)) {
     bytes = checkedAdd(bytes, alignArena(value), "prefill arena");
   }
   return bytes;
@@ -204,6 +211,10 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
       bytesFor<uint16_t>(r * geometry.target.attentionWidth));
   put(DecodeTensor::AttentionOutput,
       bytesFor<uint16_t>(r * geometry.target.hiddenSize));
+  put(DecodeTensor::TargetInverseFrequencies,
+      bytesFor<float>(geometry.target.rotaryPairs));
+  put(DecodeTensor::DraftInverseFrequencies,
+      bytesFor<float>(geometry.draftState.headDimension / 2));
   put(DecodeTensor::Positions, bytesFor<uint32_t>(r * 3));
   put(DecodeTensor::DraftPositions, bytesFor<uint32_t>(r));
   put(DecodeTensor::RopeCos,

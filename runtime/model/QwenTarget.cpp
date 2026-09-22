@@ -174,12 +174,24 @@ void QwenTarget::addPrefill(
       weights_);
 }
 
-template <class Weights>
+void QwenTarget::addPrefill(
+    metal::CommandGraph &graph, QwenTargetPrefillBuffers buffers,
+    std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
+    std::span<const kv::TQ4LayerStorage> kvLayers) const {
+  std::visit(
+      [&](const auto *weights) {
+        addPrefillImpl(*weights, graph, std::move(buffers), sequences, rows,
+                       kvLayers);
+      },
+      weights_);
+}
+
+template <class Weights, class KvLayer>
 void QwenTarget::addPrefillImpl(
     const Weights &weights, metal::CommandGraph &graph,
     QwenTargetPrefillBuffers buffers,
     std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
-    std::span<const kv::Q8LayerStorage> kvLayers) const {
+    std::span<const KvLayer> kvLayers) const {
   if (sequences.empty() ||
       sequences.size() > ExecutionLimits::maximumBatchWidth || !rows ||
       rows > ExecutionLimits::prefillTokenBudget ||
@@ -302,16 +314,35 @@ void QwenTarget::addPrefillImpl(
                   queries, keys, values, sequence.rows,
                   sequence.attentionStride, sequence.attentionStride,
                   geometry_.attentionQueryHeads, geometry_.kvLayout);
-              ops::PagedAttention::addPrefillStore(
-                  graph, kvLayers[attentionIndex], keys, values,
-                  sequence.pageTable, sequence.q8, geometry_.kvLayout);
-              ops::PagedAttention::addPrefill(
-                  graph, kvLayers[attentionIndex], queries, attentionRows,
-                  buffers.attentionPartials, buffers.attentionStatistics,
-                  sequence.pageTable, sequence.q8,
-                  operators_.prefillAttention(
-                      sequence.rows, geometry_.attentionQueryHeads,
-                      geometry_.kvLayout, sequence.q8.committed_tokens));
+              if constexpr (std::is_same_v<KvLayer, kv::Q8LayerStorage>) {
+                ops::PagedAttention::addPrefillStore(
+                    graph, kvLayers[attentionIndex], keys, values,
+                    sequence.pageTable, sequence.q8, geometry_.kvLayout);
+              } else {
+                ops::PagedAttention::addPrefillStore(
+                    graph, kvLayers[attentionIndex], keys, values,
+                    sequence.pageTable, sequence.q8,
+                    kv::TQ4Layout{geometry_.kvLayout.attentionLayers,
+                                  geometry_.kvLayout.kvHeads,
+                                  geometry_.kvLayout.headDimension});
+              }
+              if constexpr (std::is_same_v<KvLayer, kv::TQ4LayerStorage>) {
+                ops::PagedAttention::addStagedPrefill(
+                    graph, kvLayers[attentionIndex], queries, attentionRows,
+                    buffers.tq4StagedKeys, buffers.tq4StagedValues,
+                    sequence.pageTable, sequence.q8,
+                    kv::TQ4Layout{geometry_.kvLayout.attentionLayers,
+                                  geometry_.kvLayout.kvHeads,
+                                  geometry_.kvLayout.headDimension});
+              } else {
+                ops::PagedAttention::addPrefill(
+                    graph, kvLayers[attentionIndex], queries, attentionRows,
+                    buffers.attentionPartials, buffers.attentionStatistics,
+                    sequence.pageTable, sequence.q8,
+                    operators_.prefillAttention(
+                        sequence.rows, geometry_.attentionQueryHeads,
+                        geometry_.kvLayout, sequence.q8.committed_tokens));
+              }
               ops::PagedAttention::addPrefillGate(
                   graph,
                   u16(buffers.fullPacked, sequence.rowBegin, sequence.rows,
@@ -400,11 +431,25 @@ void QwenTarget::addVerify(
       weights_);
 }
 
-template <class Weights>
+void QwenTarget::addVerify(
+    metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers,
+    std::span<const kv::TQ4LayerStorage> kvLayers,
+    std::span<const kv::Q8ChunkedPrefillParams> q8,
+    std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
+    ops::Q4DispatchStats &stats) const {
+  std::visit(
+      [&](const auto *weights) {
+        addVerifyImpl(*weights, graph, std::move(buffers), kvLayers, q8,
+                      verify, lanes, stats);
+      },
+      weights_);
+}
+
+template <class Weights, class KvLayer>
 void QwenTarget::addVerifyImpl(
     const Weights &weights, metal::CommandGraph &graph,
     QwenTargetVerifyBuffers buffers,
-    std::span<const kv::Q8LayerStorage> kvLayers,
+    std::span<const KvLayer> kvLayers,
     std::span<const kv::Q8ChunkedPrefillParams> q8,
     std::span<const kv::Q8VerifyAttentionParams> verify, uint32_t lanes,
     ops::Q4DispatchStats &stats) const {

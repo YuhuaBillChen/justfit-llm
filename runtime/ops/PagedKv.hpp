@@ -37,6 +37,16 @@ struct Q8LayerStorage final {
   metal::MetalBuffer valueScales;
 };
 
+// TurboQuant Q4 uses one fp16 L2 norm and 256 packed four-bit codebook
+// indices per (token, KV head), independently for keys and values.  Keeping
+// the physical cache block at Page32 preserves Splash's prefix and scheduler
+// granularity; the codec does not require the 256-token allocation pages used
+// by the MLX implementation.
+struct TQ4LayerStorage final {
+  metal::MetalBuffer modelPages;
+  uint32_t layerIndex = 0;
+};
+
 // Shared cache format and execution limits; model dimensions live in Q8Layout.
 inline constexpr uint32_t kPageTokens = SPLASH_TARGET_KV_BLOCK_TOKENS;
 inline constexpr uint32_t kMaximumLogicalTokens =
@@ -147,6 +157,61 @@ struct Q8Layout final {
   }
 
   bool operator==(const Q8Layout &) const = default;
+};
+
+struct TQ4Layout final {
+  uint32_t attentionLayers = 0;
+  uint32_t kvHeads = 0;
+  uint32_t headDimension = 0;
+
+  [[nodiscard]] constexpr bool valid() const noexcept {
+    return attentionLayers && kvHeads && headDimension == 256;
+  }
+  [[nodiscard]] constexpr uint32_t bitsPerElement() const noexcept {
+    return 4;
+  }
+  [[nodiscard]] constexpr uint32_t packedWordsPerVector() const noexcept {
+    return headDimension * bitsPerElement() / 32;
+  }
+  [[nodiscard]] constexpr uint64_t indexBytesPerLayerPage() const noexcept {
+    return uint64_t{kPageTokens} * kvHeads * packedWordsPerVector() *
+           sizeof(uint32_t);
+  }
+  [[nodiscard]] constexpr uint64_t normBytesPerLayerPage() const noexcept {
+    return uint64_t{kPageTokens} * kvHeads * sizeof(uint16_t);
+  }
+  [[nodiscard]] constexpr uint64_t bytesPerLayerPage() const noexcept {
+    return 2 * (indexBytesPerLayerPage() + normBytesPerLayerPage());
+  }
+  [[nodiscard]] constexpr uint64_t bytesPerModelPage() const noexcept {
+    return uint64_t{attentionLayers} * bytesPerLayerPage();
+  }
+  [[nodiscard]] constexpr uint32_t sparseMappingBatchPages() const noexcept {
+    return static_cast<uint32_t>(
+        detail::pagesForAlignedMapping(bytesPerModelPage()));
+  }
+  [[nodiscard]] constexpr uint64_t sparseMappingBatchBytes() const noexcept {
+    return uint64_t{sparseMappingBatchPages()} * bytesPerModelPage();
+  }
+  [[nodiscard]] constexpr uint32_t backingExtentPages() const noexcept {
+    const uint64_t unit = sparseMappingBatchBytes();
+    if (!unit)
+      return 0;
+    return static_cast<uint32_t>(
+        ((kAllocationExtentTargetBytes + unit - 1) / unit) *
+        sparseMappingBatchPages());
+  }
+  [[nodiscard]] constexpr StorageByteCounts
+  storageByteCounts(uint64_t pageCount) const noexcept {
+    const uint64_t indices =
+        pageCount * attentionLayers * indexBytesPerLayerPage();
+    const uint64_t norms =
+        pageCount * attentionLayers * normBytesPerLayerPage();
+    return {indices, norms, indices, norms,
+            pageCount * bytesPerModelPage()};
+  }
+
+  bool operator==(const TQ4Layout &) const = default;
 };
 
 enum class Quantization : uint32_t { SymmetricInt8 = 1 };

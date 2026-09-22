@@ -44,6 +44,12 @@ KernelLayout attentionKernelLayout(uint32_t queryHeads, kv::Q8Layout layout) {
   throw std::invalid_argument("no paged-attention kernel for layout");
 }
 
+void requireTQ4Layout(kv::TQ4Layout layout) {
+  if (!layout.valid() || layout.attentionLayers != 16 ||
+      layout.kvHeads != 4 || layout.headDimension != 256)
+    throw std::invalid_argument("no TQ4 attention kernel for layout");
+}
+
 std::string_view pipeline(KernelLayout layout, std::string_view kv4Group6,
                           std::string_view kv2Group8) noexcept {
   return layout == KernelLayout::Kv4Group6 ? kv4Group6 : kv2Group8;
@@ -349,6 +355,22 @@ void PagedAttention::addPrefillStore(
             {layout.headDimension, 1, 1});
 }
 
+void PagedAttention::addPrefillStore(
+    metal::CommandGraph &graph, const kv::TQ4LayerStorage &layer,
+    metal::MetalBuffer chunkKeys, metal::MetalBuffer chunkValues,
+    metal::MetalBuffer pageTable, const kv::Q8ChunkedPrefillParams &params,
+    kv::TQ4Layout layout) {
+  requireTQ4Layout(layout);
+  if (layer.layerIndex >= layout.attentionLayers)
+    throw std::invalid_argument("TQ4 layer index is outside layout");
+  const kv::TQ4StoreParams tq4{params, layer.layerIndex, 0, 0, 0};
+  graph.add("prefill_attention_tq4_store",
+            {std::move(chunkKeys), std::move(chunkValues), layer.modelPages,
+             std::move(pageTable)},
+            tq4, {uint64_t{2} * params.chunk_tokens * layout.kvHeads, 1, 1},
+            {layout.headDimension, 1, 1});
+}
+
 void PagedAttention::addPrefill(
     metal::CommandGraph &graph, const kv::Q8LayerStorage &layer,
     metal::MetalBuffer queries, metal::MetalBuffer output,
@@ -376,6 +398,74 @@ void PagedAttention::addPrefill(
   graph.add(std::string(plan.reducePipeline),
             {std::move(partials), std::move(statistics), std::move(output)},
             params, plan.reduceGroups);
+}
+
+void PagedAttention::addStagedPrefill(
+    metal::CommandGraph &graph, const kv::TQ4LayerStorage &layer,
+    metal::MetalBuffer queries, metal::MetalBuffer output,
+    metal::MetalBuffer stagedKeys, metal::MetalBuffer stagedValues,
+    metal::MetalBuffer pageTable, const kv::Q8ChunkedPrefillParams &chunk,
+    kv::TQ4Layout layout) {
+  requireTQ4Layout(layout);
+  const std::string_view error = kv::chunkedPrefillValidationError(chunk);
+  if (!error.empty())
+    throw std::invalid_argument(std::string(error));
+  if (layer.layerIndex >= layout.attentionLayers)
+    throw std::invalid_argument("TQ4 staged prefill layer is outside layout");
+  const uint32_t visible = chunk.committed_tokens + chunk.chunk_tokens;
+  const uint64_t stagedBytes = uint64_t{visible} * layout.headDimension *
+                               sizeof(uint16_t);
+  if (stagedKeys.sizeBytes() < stagedBytes ||
+      stagedValues.sizeBytes() < stagedBytes)
+    throw std::invalid_argument("TQ4 staged prefill planes are too small");
+  const uint32_t pages = (visible + kv::kPageTokens - 1) / kv::kPageTokens;
+  const uint32_t tiles = kv::prefillAttentionTiles(chunk.chunk_tokens);
+  for (uint32_t head = 0; head < layout.kvHeads; ++head) {
+    const kv::TQ4StagedPrefillParams params{
+        chunk.committed_tokens, chunk.chunk_tokens, chunk.chunk_stride,
+        visible, layer.layerIndex, head, 0, 0};
+    if (head == 0) {
+      graph.add("prefill_attention_tq4_stage_head",
+                {layer.modelPages, stagedKeys, stagedValues, pageTable}, params,
+                {pages, 1, 1}, {256, 1, 1});
+    } else {
+      graph.addAfterBarrier(
+          "prefill_attention_tq4_stage_head",
+          {layer.modelPages, stagedKeys, stagedValues, pageTable}, params,
+          {pages, 1, 1}, {256, 1, 1});
+    }
+    graph.addAfterBarrier("prefill_attention_tq4_staged_head",
+                          {queries, stagedKeys, stagedValues, output}, params,
+                          {tiles, 1, 1}, {256, 1, 1});
+  }
+}
+
+void PagedAttention::addPrefill(
+    metal::CommandGraph &graph, const kv::TQ4LayerStorage &layer,
+    metal::MetalBuffer queries, metal::MetalBuffer output,
+    metal::MetalBuffer partials, metal::MetalBuffer statistics,
+    metal::MetalBuffer pageTable, const kv::Q8ChunkedPrefillParams &chunk,
+    const PrefillAttentionPlan &plan) {
+  if (chunk.chunk_tokens != plan.rows ||
+      chunk.committed_tokens != plan.historyTokens)
+    throw std::invalid_argument("TQ4 prefill rows or history do not match plan");
+  const std::string_view error = kv::chunkedPrefillValidationError(chunk);
+  if (!error.empty())
+    throw std::invalid_argument(std::string(error));
+  if (partials.sizeBytes() < plan.workspace.partialsBytes ||
+      statistics.sizeBytes() < plan.workspace.statisticsBytes)
+    throw std::invalid_argument("TQ4 prefill scratch is smaller than its bound");
+  const kv::TQ4PrefillAttentionParams params{
+      {chunk.committed_tokens, chunk.chunk_tokens, chunk.chunk_stride,
+       chunk.page_table_entries, chunk.physical_page_count, plan.splits, 0, 0},
+      layer.layerIndex, 0, 0, 0};
+  graph.add("prefill_attention_tq4_mpp_split",
+            {std::move(queries), layer.modelPages, partials, statistics,
+             std::move(pageTable)},
+            params, plan.splitGroups, {256, 1, 1});
+  graph.add("prefill_attention_tq4_mpp_reduce",
+            {std::move(partials), std::move(statistics), std::move(output)},
+            params, plan.reduceGroups, {256, 1, 1});
 }
 
 void PagedAttention::addVerify(
@@ -441,6 +531,65 @@ void PagedAttention::addVerify(
   graph.add(std::string(plan.reducePipeline),
             {buffers.partials, buffers.statistics, buffers.output},
             attention, plan.reduceGroups);
+}
+
+void PagedAttention::addVerify(
+    metal::CommandGraph &graph, const kv::TQ4LayerStorage &layer,
+    PagedVerifyBuffers buffers,
+    std::span<const kv::Q8ChunkedPrefillParams> storeParams,
+    std::span<const kv::Q8VerifyAttentionParams> attentionParams,
+    const VerifyAttentionPlan &plan) {
+  const uint32_t lanes = plan.lanes;
+  constexpr uint32_t maximumLanes = SPLASH_MAXIMUM_BATCH_WIDTH;
+  if (storeParams.size() != maximumLanes ||
+      attentionParams.size() != maximumLanes ||
+      buffers.pageTables.size() != maximumLanes)
+    throw std::invalid_argument("invalid TQ4 paged verify batch");
+  if (buffers.partials.sizeBytes() < plan.workspace.partialsBytes ||
+      buffers.statistics.sizeBytes() < plan.workspace.statisticsBytes)
+    throw std::invalid_argument("TQ4 verify scratch is smaller than its bound");
+  std::array<kv::TQ4StoreParams, maximumLanes> stores{};
+  std::array<kv::TQ4VerifyAttentionParams, maximumLanes> attention{};
+  for (uint32_t lane = 0; lane < maximumLanes; ++lane) {
+    stores[lane] = {storeParams[lane], layer.layerIndex, 0, 0, 0};
+    kv::Q8VerifyAttentionParams resolved = attentionParams[lane];
+    if (lane < lanes) {
+      const auto storeError = kv::chunkedPrefillValidationError(storeParams[lane]);
+      const auto attentionError =
+          kv::q8VerifyAttentionValidationError(attentionParams[lane]);
+      if (!storeError.empty() || !attentionError.empty() ||
+          storeParams[lane].chunk_tokens != kv::kQ8VerifyMaximumRows ||
+          storeParams[lane].committed_tokens !=
+              attentionParams[lane].committed_tokens ||
+          storeParams[lane].chunk_stride !=
+              attentionParams[lane].chunk_stride ||
+          storeParams[lane].page_table_entries !=
+              attentionParams[lane].page_table_entries ||
+          storeParams[lane].physical_page_count !=
+              attentionParams[lane].physical_page_count ||
+          storeParams[lane].chunk_stride != storeParams[0].chunk_stride)
+        throw std::invalid_argument("inconsistent TQ4 verify lane parameters");
+      resolved.split_count = plan.laneSplits[lane];
+      resolved.slot_splits = plan.splits;
+    }
+    attention[lane] = {resolved, layer.layerIndex, 0, 0, 0};
+  }
+  std::vector<metal::MetalBuffer> storeBuffers{
+      buffers.chunkKeys, buffers.chunkValues, layer.modelPages};
+  storeBuffers.insert(storeBuffers.end(), buffers.pageTables.begin(),
+                      buffers.pageTables.end());
+  graph.add("verify_attention_tq4_store", std::move(storeBuffers), stores,
+            {uint64_t{lanes} * 2 * kv::kQ8VerifyMaximumRows * 4, 1, 1},
+            {256, 1, 1});
+  std::vector<metal::MetalBuffer> splitBuffers{
+      buffers.queries, layer.modelPages, buffers.partials, buffers.statistics};
+  splitBuffers.insert(splitBuffers.end(), buffers.pageTables.begin(),
+                      buffers.pageTables.end());
+  graph.add("verify_attention_tq4_mpp_split", std::move(splitBuffers), attention,
+            plan.splitGroups, {256, 1, 1});
+  graph.add("verify_attention_tq4_mpp_reduce",
+            {buffers.partials, buffers.statistics, buffers.output}, attention,
+            plan.reduceGroups, {256, 1, 1});
 }
 
 } // namespace splash::ops

@@ -25,6 +25,18 @@ void testByteAccounting() {
   assert(one.total == 1'064'960);
   StorageByteCounts production = storageByteCounts(4608);
   assert(production.total == 4'907'335'680ULL); // 147456 tokens.
+
+  constexpr TQ4Layout tq4{16, 4, 256};
+  static_assert(tq4.valid());
+  static_assert(tq4.packedWordsPerVector() == 32);
+  static_assert(tq4.indexBytesPerLayerPage() == 16'384);
+  static_assert(tq4.normBytesPerLayerPage() == 256);
+  static_assert(tq4.bytesPerModelPage() == 532'480);
+  static_assert(tq4.bytesPerModelPage() / kPageTokens == 16'640);
+  static_assert(tq4.sparseMappingBatchPages() == 8);
+  static_assert(tq4.backingExtentPages() == 256);
+  static_assert(tq4.storageByteCounts(8'192).total ==
+                4'362'076'160ULL); // 262,144 tokens = 4,160 MiB.
 }
 
 void testLayouts() {

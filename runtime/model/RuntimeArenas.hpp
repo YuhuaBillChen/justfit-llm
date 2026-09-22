@@ -132,6 +132,8 @@ enum class PrefillTensor : uint32_t {
   DraftRopeSin,
   ChunkKeys,
   ChunkValues,
+  TQ4StagedKeys,
+  TQ4StagedValues,
   MoeSelectedExperts,
   MoeRoutingWeights,
   MoeTileDescriptors,
@@ -151,16 +153,17 @@ constexpr uint32_t prefillTensorCount =
 // bounds include the operator defaults and every installed configuration.
 [[nodiscard]] std::array<uint64_t, prefillTensorCount>
 prefillTensorBytes(const RuntimeGeometry &geometry,
-                   const ops::ExecutionPlans &operators);
+                   const ops::ExecutionPlans &operators, bool tq4Kv = false);
 [[nodiscard]] uint64_t plannedPrefillBytes(const RuntimeGeometry &geometry,
-                                           const ops::ExecutionPlans &operators);
+                                           const ops::ExecutionPlans &operators,
+                                           bool tq4Kv = false);
 
 class PrefillArena final {
 public:
   PrefillArena(metal::MetalBackend &backend, const RuntimeGeometry &geometry,
-                const ops::ExecutionPlans &operators)
-      : bytes_(plannedPrefillBytes(geometry, operators)) {
-    const auto sizes = prefillTensorBytes(geometry, operators);
+                const ops::ExecutionPlans &operators, bool tq4Kv = false)
+      : bytes_(plannedPrefillBytes(geometry, operators, tq4Kv)) {
+    const auto sizes = prefillTensorBytes(geometry, operators, tq4Kv);
     base_ = backend.allocateBuffer(bytes_, metal::BufferStorage::Shared,
                                    "qwen-shared-prefill");
     uint64_t cursor = 0;
@@ -216,6 +219,8 @@ enum class DecodeTensor : uint32_t {
   FullAttention,
   AttentionHidden,
   AttentionOutput,
+  TargetInverseFrequencies,
+  DraftInverseFrequencies,
   Positions,
   DraftPositions,
   RopeCos,
@@ -342,6 +347,22 @@ public:
     if (denseScratchBytes) {
       gateScratch_ = backend_.allocateBuffer(
           denseScratchBytes, metal::BufferStorage::Private, "qwen-gate-scratch");
+    }
+    auto *target = static_cast<float *>(
+        get(0, DecodeTensor::TargetInverseFrequencies).contents());
+    auto *draft = static_cast<float *>(
+        get(0, DecodeTensor::DraftInverseFrequencies).contents());
+    if (!target || !draft)
+      throw std::logic_error("decode RoPE frequencies are not CPU-visible");
+    for (uint32_t dim = 0; dim < geometry_.target.rotaryPairs; ++dim) {
+      target[dim] =
+          std::pow(geometry_.target.rotaryTheta,
+                   -static_cast<float>(dim) / geometry_.target.rotaryPairs);
+    }
+    const uint32_t draftRotaryPairs = geometry_.draftState.headDimension / 2;
+    for (uint32_t dim = 0; dim < draftRotaryPairs; ++dim) {
+      draft[dim] = std::pow(geometry_.draft.rotaryTheta,
+                            -static_cast<float>(dim) / draftRotaryPairs);
     }
     bytes_ = checkedAdd(baseBytes, denseScratchBytes, "decode arena");
   }

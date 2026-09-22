@@ -7,6 +7,7 @@
 #include "Qwen3_8.hpp"
 #include "QwenVision.hpp"
 #include "ops/Q8PageStorage.hpp"
+#include "ops/TQ4PageStorage.hpp"
 #include "ops/ExecutionPlans.hpp"
 
 #include <filesystem>
@@ -59,13 +60,17 @@ struct ModelPackage final {
 struct RuntimeContext final {
   metal::MetalBackend &backend;
   metal::AllocationAdmission admitAllocation;
-  const ModelPackage &package;
-  kv::Q8PageStorage &kvPages;
+  ModelPackage &package;
+  std::filesystem::path modelRoot;
+  kv::Q8PageStorage *kvPages = nullptr;
+  kv::TQ4PageStorage *tq4Pages = nullptr;
   StateStorage &stateStorage;
   const ops::ExecutionPlans &operators;
   uint32_t maximumImagePatches = ops::kMaximumImagePatches;
   uint64_t pipelineReserveBytes = 0;
   uint64_t runtimeOverheadReserveBytes = 0;
+  bool justFitPhaseResidency = false;
+  bool justFitTq4Kv = false;
 };
 
 // Validates only the interface between independently defined target and draft
@@ -85,7 +90,8 @@ loadModelPackage(metal::MetalBackend &backend,
 [[nodiscard]] ModelMemoryPlan
 plannedRuntimeMemory(const DeviceCapabilities &device,
                      const ModelPackage &package,
-                     const ops::ExecutionPlans &operators);
+                     const ops::ExecutionPlans &operators,
+                     bool tq4Kv = false);
 [[nodiscard]] std::unique_ptr<StateStorage>
 createStateStorage(metal::MetalBackend &backend,
                    metal::AllocationAdmission admitAllocation,

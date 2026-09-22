@@ -339,6 +339,10 @@ struct ModelTelemetry final {
   uint64_t draftStateResets = 0;
   uint64_t imageEncodes = 0;
   uint64_t imageEmbeddingReuses = 0;
+  bool draftWeightsResident = true;
+  uint64_t draftWeightBytes = 0;
+  uint64_t draftLoadCount = 0;
+  uint64_t draftUnloadCount = 0;
   uint32_t lastDecodeWidth = 0;
   uint64_t lastDecodeFusedOperations = 0;
   uint64_t lastDecodeM16Dispatches = 0;

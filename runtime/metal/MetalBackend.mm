@@ -1419,6 +1419,9 @@ CommandTicket MetalBackend::submitCommandAsync(
         try {
             for (const PreparedDispatch &item : prepared) {
                 const ComputeDispatch &dispatch = *item.source;
+                if (dispatch.barrierBefore) {
+                    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                }
                 [encoder setComputePipelineState:item.pipeline];
                 for (const BufferBinding &binding : dispatch.buffers) {
                     const MetalBuffer::Impl &buffer = *binding.buffer.impl_;

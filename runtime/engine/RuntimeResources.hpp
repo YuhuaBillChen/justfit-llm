@@ -5,6 +5,7 @@
 #include "engine/Cache.hpp"
 #include "engine/MemoryGovernor.hpp"
 #include "ops/Q8PageStorage.hpp"
+#include "ops/TQ4PageStorage.hpp"
 #include "model/ModelFactory.hpp"
 #include "engine/MemoryAudit.hpp"
 #include "ops/ExecutionPlans.hpp"
@@ -35,6 +36,8 @@ runtimeResourceStageName(RuntimeResourceStage stage);
 
 inline constexpr std::string_view kQ8FormatName =
     "q8s8_f32_scale_per_token_head_k_token_major_v_dimension_major";
+inline constexpr std::string_view kTQ4FormatName =
+    "tq4_nonuniform_rht_fp16_norm_page_major";
 
 [[nodiscard]] inline std::string
 digestHex(const std::array<uint8_t, 32> &digest) {
@@ -56,6 +59,7 @@ struct RuntimeCacheIdentity {
   CacheNamespace cacheNamespace;
   // Stable binary layout guard for physical Q8 pages.
   kv::Q8LayoutGuard q8Layout;
+  bool tq4Kv = false;
   // SHA-256 of the versioned model/build/Q8 compatibility tuple.
   std::string namespaceSha256;
 };
@@ -64,7 +68,8 @@ struct RuntimeCacheIdentity {
 makeRuntimeCacheIdentity(std::string_view combinedManifestSha256,
                          std::string_view targetManifestSha256,
                          std::string_view buildId,
-                         kv::Q8Layout targetKvLayout);
+                         kv::Q8Layout targetKvLayout,
+                         bool tq4Kv = false);
 
 struct RuntimeResourcesConfig {
   std::filesystem::path metallibPath;
@@ -72,6 +77,19 @@ struct RuntimeResourcesConfig {
   model::ModelDescriptor model;
   std::string buildId;
   uint64_t maximumMemoryBytes = 0;
+  // Optional hard host-memory reserve. Zero keeps the conservative automatic
+  // policy. An explicit value is for measured boundary runs: allocations may
+  // enter the warning band, but never cross this reserve or an OS critical
+  // pressure signal.
+  uint64_t hostReserveBytes = 0;
+  // Experimental JustFit residency policy. Text-only serving drops the
+  // vision package after its allocation has been measured, allowing its
+  // budget to be reassigned to the paged KV pool. Image admission is rejected
+  // until native vision rematerialization is implemented.
+  bool justFitPhaseResidency = false;
+  // Experimental page-native TurboQuant-Q4 target KV. Disabled by default;
+  // the public Splash Q8 ABI and cache namespace remain unchanged.
+  bool justFitTq4Kv = false;
   // Patches per image the vision scratch covers; the protocol limit and the
   // engine's request validation use the same value.
   uint32_t maximumImagePatches = ops::kMaximumImagePatches;
@@ -184,29 +202,37 @@ public:
 private:
 
   RuntimeResources(std::unique_ptr<metal::MetalBackend> backend,
-                   model::ModelPackage model, ops::ExecutionPlans operators,
+                   model::ModelPackage model,
+                   std::filesystem::path modelRoot,
+                   ops::ExecutionPlans operators,
                    EngineMemoryPlan memoryPlan,
                    model::ModelMemoryPlan modelMemoryPlan,
                    RuntimeCacheIdentity cacheIdentity,
                    std::unique_ptr<MemoryGovernor> memoryGovernor,
                    std::unique_ptr<kv::Q8PageStorage> kvPages,
+                   std::unique_ptr<kv::TQ4PageStorage> tq4Pages,
                    std::unique_ptr<model::StateStorage> stateStorage,
                    std::unique_ptr<KvPool> kvPool,
                    std::unique_ptr<engine::Cache> cache,
-                   uint32_t maximumImagePatches);
+                   uint32_t maximumImagePatches,
+                   bool justFitPhaseResidency, bool justFitTq4Kv);
 
   std::unique_ptr<metal::MetalBackend> backend_;
   model::ModelPackage model_;
+  std::filesystem::path modelRoot_;
   ops::ExecutionPlans operators_;
   EngineMemoryPlan memoryPlan_;
   model::ModelMemoryPlan modelMemoryPlan_;
   RuntimeCacheIdentity cacheIdentity_;
   std::unique_ptr<MemoryGovernor> memoryGovernor_;
   std::unique_ptr<kv::Q8PageStorage> kvPages_;
+  std::unique_ptr<kv::TQ4PageStorage> tq4Pages_;
   std::unique_ptr<model::StateStorage> stateStorage_;
   std::unique_ptr<KvPool> kvPool_;
   std::unique_ptr<engine::Cache> cache_;
   uint32_t maximumImagePatches_ = 0;
+  bool justFitPhaseResidency_ = false;
+  bool justFitTq4Kv_ = false;
 };
 
 } // namespace splash::engine

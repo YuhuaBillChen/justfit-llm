@@ -83,6 +83,7 @@ TEST_Q8_METAL_TEST := $(ENGINE_TEST_BUILD)/q8-paged-kv-metal
 TEST_Q8_STORAGE_TEST := $(ENGINE_TEST_BUILD)/q8-page-storage
 TEST_Q8_ATTENTION_TEST := $(ENGINE_TEST_BUILD)/q8-flash-attention
 TEST_Q8_PREFILL_TEST := $(ENGINE_TEST_BUILD)/q8-chunked-prefill
+TEST_TQ4_STORE_TEST := $(ENGINE_TEST_BUILD)/tq4-store-metal
 TEST_Q4_BATCH_TEST := $(ENGINE_TEST_BUILD)/q4-batched-projection
 TEST_MOE_METAL_TEST := $(ENGINE_TEST_BUILD)/moe-metal
 TEST_GDN_METAL_TEST := $(ENGINE_TEST_BUILD)/gdn-metal
@@ -120,6 +121,12 @@ TEST_Q8_KERNEL_SOURCES := \
 	runtime/metal/kernels/decode/attention_q8_store.metal
 TEST_Q8_KERNEL_AIRS := $(patsubst runtime/metal/kernels/%.metal,$(ENGINE_TEST_BUILD)/kernels/%.air,$(TEST_Q8_KERNEL_SOURCES))
 TEST_Q8_ATTENTION_LIB := $(ENGINE_TEST_BUILD)/q8-attention.metallib
+TEST_TQ4_KERNEL_SOURCES := \
+	runtime/metal/kernels/prefill/attention_tq4_store.metal \
+	runtime/metal/kernels/prefill/attention_tq4.metal \
+	runtime/metal/kernels/decode/attention_tq4.metal
+TEST_TQ4_KERNEL_AIRS := $(patsubst runtime/metal/kernels/%.metal,$(ENGINE_TEST_BUILD)/kernels/%.air,$(TEST_TQ4_KERNEL_SOURCES))
+TEST_TQ4_STORE_LIB := $(ENGINE_TEST_BUILD)/tq4-store.metallib
 TEST_METAL_BACKEND_TEST := $(ENGINE_TEST_BUILD)/metal-backend
 TEST_METAL_BACKEND_AIR := $(ENGINE_TEST_BUILD)/metal-backend.air
 TEST_METAL_BACKEND_LIB := $(ENGINE_TEST_BUILD)/metal-backend.metallib
@@ -164,6 +171,7 @@ TEST_METAL_TARGETS := $(TEST_TUNING_WORKLOADS) \
 	$(TEST_Q8_STORAGE_TEST) \
 	$(TEST_Q8_ATTENTION_TEST) \
 	$(TEST_Q8_PREFILL_TEST) \
+	$(TEST_TQ4_STORE_TEST) \
 	$(TEST_Q4_BATCH_TEST) \
 	$(TEST_MOE_METAL_TEST) \
 	$(TEST_GDN_METAL_TEST) \
@@ -172,7 +180,8 @@ TEST_METAL_TARGETS := $(TEST_TUNING_WORKLOADS) \
 	$(TEST_GDN_DECODE_TEST) \
 	$(TEST_DRAFT_SELECTOR_TEST) \
 	$(TEST_METAL_BACKEND_TEST) \
-	$(LIB) $(TEST_METAL_BACKEND_LIB) $(TEST_Q8_LIB) $(TEST_Q8_ATTENTION_LIB)
+	$(LIB) $(TEST_METAL_BACKEND_LIB) $(TEST_Q8_LIB) $(TEST_Q8_ATTENTION_LIB) \
+	$(TEST_TQ4_STORE_LIB)
 
 TEST_UNIT_TEST_TARGETS := $(sort $(TEST_CPU_TARGETS) $(TEST_METAL_TARGETS))
 
@@ -181,7 +190,8 @@ TEST_UNIT_TEST_TARGETS := $(sort $(TEST_CPU_TARGETS) $(TEST_METAL_TARGETS))
 TEST_CONFIG_TARGETS := $(filter-out $(LIB),$(TEST_UNIT_TEST_TARGETS)) \
 	$(TEST_MODEL_RUNTIME_ORACLE) $(TEST_VISION_ENCODER_TEST) \
 	$(TEST_DECODE_PROFILE) $(TEST_ATTENTION_SWEEP) \
-	$(TEST_Q8_AIR) $(TEST_Q8_KERNEL_AIRS) $(TEST_METAL_BACKEND_AIR)
+	$(TEST_Q8_AIR) $(TEST_Q8_KERNEL_AIRS) $(TEST_TQ4_KERNEL_AIRS) \
+	$(TEST_METAL_BACKEND_AIR)
 PRODUCTION_CONFIG_TARGETS += $(TEST_Q4_PREFILL_PROFILE) \
 	$(TEST_Q4_DECODE_PROFILE) $(TEST_BACKEND_BENCHMARK) $(TUNE_KERNELS)
 SANITIZER_CONFIG_TARGETS := $(TEST_BACKEND_ASAN) $(TEST_BACKEND_TSAN) \
@@ -303,6 +313,7 @@ $(TEST_QWEN_STATE_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/metal/MetalBackend.mm \
 		runtime/engine/MemoryGovernor.cpp \
 		runtime/ops/Q8PageStorage.mm \
+		runtime/ops/TQ4PageStorage.mm \
 		runtime/model/WeightStore.cpp \
 		runtime/model/DFlashDraft.cpp \
 		$(MODEL_OPERATOR_SOURCES) \
@@ -336,6 +347,15 @@ $(ENGINE_TEST_BUILD)/kernels/%.air: runtime/metal/kernels/%.metal \
 
 $(TEST_Q8_ATTENTION_LIB): $(TEST_Q8_KERNEL_AIRS) $(TEST_Q8_AIR)
 	$(RUN_CONFIGURED) $(METALLIB) $(BUILD_INPUTS) -o $@
+
+$(TEST_TQ4_STORE_LIB): $(TEST_TQ4_KERNEL_AIRS)
+	$(RUN_CONFIGURED) $(METALLIB) $(BUILD_INPUTS) -o $@
+
+$(TEST_TQ4_STORE_TEST): dev/tests/engine/tq4_store_metal_test.mm \
+		dev/tests/engine/Q8PageFormatReference.hpp $(TEST_TQ4_STORE_LIB) \
+		| $(ENGINE_TEST_BUILD)
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $< \
+		$(ENGINE_LINKFLAGS) -o $@
 
 $(TEST_Q8_ATTENTION_TEST): dev/tests/engine/q8_flash_attention_metal_test.mm \
 		dev/tests/engine/Q8PageFormatReference.hpp $(TEST_Q8_ATTENTION_LIB) | $(ENGINE_TEST_BUILD)
@@ -483,6 +503,7 @@ $(TEST_Q8_STORAGE_TEST): runtime/metal/DeviceCapabilities.cpp \
 		runtime/metal/MetalBackend.mm \
 		runtime/engine/MemoryGovernor.cpp \
 		runtime/ops/Q8PageStorage.mm \
+		runtime/ops/TQ4PageStorage.mm \
 		dev/tests/engine/q8_page_storage_test.mm | $(ENGINE_TEST_BUILD)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_TEST_CXXFLAGS) -fobjc-arc $(TEST_INPUTS) \
 		$(ENGINE_LINKFLAGS) -o $@
@@ -595,6 +616,7 @@ test-engine-metal: $(TEST_METAL_TARGETS)
 	$(METAL_TEST_ENV) $(TEST_Q8_STORAGE_TEST) $(TEST_Q8_LIB)
 	$(METAL_TEST_ENV) $(TEST_Q8_ATTENTION_TEST) $(TEST_Q8_ATTENTION_LIB)
 	$(METAL_TEST_ENV) $(TEST_Q8_PREFILL_TEST) $(TEST_Q8_ATTENTION_LIB)
+	$(METAL_TEST_ENV) $(TEST_TQ4_STORE_TEST) $(TEST_TQ4_STORE_LIB)
 	$(METAL_TEST_ENV) $(TEST_Q4_BATCH_TEST) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_MOE_METAL_TEST) $(LIB)
 	$(METAL_TEST_ENV) $(TEST_GDN_METAL_TEST) $(LIB)

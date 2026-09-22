@@ -47,6 +47,22 @@ public:
                               payloads_.back().data(), sizeof(Params)});
   }
 
+  template <class Params>
+  void addAfterBarrier(
+      std::string pipeline, std::vector<MetalBuffer> buffers,
+      const Params &params, DispatchSize groups,
+      DispatchSize threads = {kDefaultThreads, 1, 1}) {
+    static_assert(std::is_trivially_copyable_v<Params>,
+                  "dispatch parameters must be plain data");
+    payloads_.emplace_back(sizeof(Params));
+    std::memcpy(payloads_.back().data(), &params, sizeof(Params));
+    ComputeDispatch &dispatch =
+        push(std::move(pipeline), std::move(buffers), groups, threads);
+    dispatch.barrierBefore = true;
+    dispatch.bytes.push_back({static_cast<uint32_t>(dispatch.buffers.size()),
+                              payloads_.back().data(), sizeof(Params)});
+  }
+
   [[nodiscard]] bool empty() const noexcept { return dispatches_.empty(); }
   [[nodiscard]] std::span<const ComputeDispatch> dispatches() const noexcept {
     return dispatches_;

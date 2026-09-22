@@ -281,6 +281,15 @@ CacheReclaimResult Cache::reclaimOne(CacheReclaimMode mode,
                     : 0};
 }
 
+uint32_t Cache::reclaimStateFreeKvForReuse() {
+  uint32_t blocks = 0;
+  while (const auto candidate = oldestStateFreeKvBlock()) {
+    kv_.erase(candidate->id);
+    ++blocks;
+  }
+  return blocks;
+}
+
 bool Cache::reclaimOneState(bool checkpointsOnly) {
   const std::optional<CacheEvictionCandidate> state =
       states_.evictionCandidate();

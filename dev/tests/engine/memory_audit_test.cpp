@@ -98,12 +98,39 @@ void testFixedCategoryAndPeakFailures() {
           "bad warmup estimate was accepted");
 }
 
+void testPhaseManagedVisionMayBeAbsentFromAudit() {
+  DeviceCapabilities device;
+  device.deviceName = "test";
+  device.appleGpuFamily = 9;
+  device.macosMajor = 26;
+  device.macosMinor = 4;
+  device.physicalMemoryBytes = 32 * kGiB;
+  device.recommendedMaxWorkingSetBytes = 24 * kGiB;
+  device.maxBufferLengthBytes = 16 * kGiB;
+  device.maxThreadgroupMemoryBytes = 32 * 1024;
+  device.maxThreadgroupWidth = 1024;
+  device.hasUnifiedMemory = true;
+  device.supportsPlacementSparse = true;
+
+  ModelMemoryProfile profile =
+      test::modelMemoryProfile(2 * kGiB, 1 * kGiB, 0);
+  profile.footprint.phaseManagedVision = true;
+  EngineMemoryPlan memoryPlan = requireEngineMemoryPlan(device, profile);
+  ActualMemoryReport actual = report(memoryPlan);
+  require(actual.visionWeightsBytes == 0,
+          "test fixture unexpectedly retained phase-managed vision");
+  auto valid = auditActualMemory(memoryPlan, actual);
+  require(valid.valid && valid.error == MemoryAuditError::None,
+          "phase-managed nonresident vision failed memory audit");
+}
+
 } // namespace
 
 int main() {
   try {
     testUnifiedDynamicAudit();
     testFixedCategoryAndPeakFailures();
+    testPhaseManagedVisionMayBeAbsentFromAudit();
     std::cout << "elastic memory audit tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception &error) {

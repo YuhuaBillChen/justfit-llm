@@ -125,6 +125,11 @@ public:
   [[nodiscard]] CacheReclaimResult reclaimOne(
       CacheReclaimMode mode = CacheReclaimMode::ReleaseBacking,
       bool keepResumePoint = false);
+  // A hybrid model cannot resume from KV alone. After an active request is
+  // suspended, recycle the state-free suffix (or the entire chain when no
+  // composite state exists) as resident backing for its replay. State-backed
+  // prefixes remain available as valid resume points.
+  [[nodiscard]] uint32_t reclaimStateFreeKvForReuse();
   // Recycles an unpinned state, preferring checkpoints, for a required state
   // publication. KV bytes only return once an extent unmaps.
   [[nodiscard]] bool reclaimOneState(bool checkpointsOnly = false);

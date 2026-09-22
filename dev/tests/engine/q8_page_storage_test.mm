@@ -1,4 +1,5 @@
 #include "ops/Q8PageStorage.hpp"
+#include "ops/TQ4PageStorage.hpp"
 #include "engine/MemoryGovernor.hpp"
 #include "engine/MemoryPlan.hpp"
 
@@ -91,6 +92,7 @@ void run(const std::string &metallib) {
             "the macOS reserve is a tenth of a small machine, 2 GiB above 20 GiB");
     constexpr kv::Q8Layout q8Layout{16, 4, 256};
     constexpr kv::Q8Layout compactLayout{10, 2, 256};
+    constexpr kv::TQ4Layout tq4Layout{16, 4, 256};
     // 64 KiB sparse tiles: the 512-byte-per-page scale buffers force
     // 128-page mapping batches for four KV heads and 256 for two.
     static_assert(kv::kSparseMappingAlignmentBytes == 64 * 1024);
@@ -100,6 +102,15 @@ void run(const std::string &metallib) {
     static_assert(compactLayout.bytesPerModelPage() == 332'800);
     static_assert(compactLayout.sparseMappingBatchPages() == 256);
     static_assert(compactLayout.backingExtentPages() == 512);
+    static_assert(tq4Layout.packedWordsPerVector() == 32);
+    static_assert(tq4Layout.indexBytesPerLayerPage() == 16'384);
+    static_assert(tq4Layout.normBytesPerLayerPage() == 256);
+    static_assert(tq4Layout.bytesPerModelPage() == 532'480);
+    static_assert(tq4Layout.bytesPerModelPage() / kv::kPageTokens == 16'640);
+    static_assert(tq4Layout.sparseMappingBatchPages() == 8);
+    static_assert(tq4Layout.backingExtentPages() == 256);
+    static_assert(tq4Layout.storageByteCounts(8'192).total ==
+                  4'362'076'160ULL); // 262,144 retained positions = 4,160 MiB.
     metal::MetalBackend backend(metallib);
     auto baseline = backend.memoryStats();
     uint64_t observed = std::max(
@@ -182,6 +193,26 @@ void run(const std::string &metallib) {
     require(bounded.snapshot().pressure == MemoryPressure::Normal &&
                 bounded.snapshot().growthAllowed,
             "host recovery did not reopen physical admission");
+    {
+      // A user-selected boundary-run reserve is a hard floor, not an
+      // additional 1-GiB allocation ban. Warning pressure remains visible and
+      // critical pressure still stops growth.
+      std::optional<uint64_t> boundaryAvailable = hostReserve + 512 * 1024;
+      MemoryGovernor boundary(
+          backend, observed + 64 * 1024, hostReserve,
+          [&boundaryAvailable] { return boundaryAvailable; }, true);
+      require(boundary.snapshot().pressure == MemoryPressure::Warning &&
+                  boundary.snapshot().growthAllowed &&
+                  boundary.tryReserve(1024).has_value(),
+              "explicit hard host reserve did not permit warning-band growth");
+      boundaryAvailable = hostReserve;
+      require(!boundary.tryReserve(1).has_value(),
+              "explicit hard host reserve was crossed");
+      boundaryAvailable = hostReserve + 512 * 1024;
+      boundary.setPressure(MemoryPressure::Critical);
+      require(!boundary.tryReserve(1).has_value(),
+              "explicit reserve bypassed OS critical pressure");
+    }
     {
         auto reservation = bounded.tryReserve(64 * 1024);
         require(reservation.has_value(), "engine capacity reservation failed");
@@ -363,6 +394,28 @@ void run(const std::string &metallib) {
                 compactStorage.residentPages() ==
                     compactLayout.sparseMappingBatchPages(),
             "model-provided compact Q8 geometry was not honored");
+
+    kv::TQ4PageStorage tq4Storage(
+        backend, governor.allocationAdmission(), tq4Layout,
+        tq4Layout.sparseMappingBatchPages());
+    require(static_cast<bool>(tq4Storage.layer(15).modelPages) &&
+                tq4Storage.layer(15).layerIndex == 15 &&
+                tq4Storage.declaredBytes() ==
+                    uint64_t{tq4Layout.sparseMappingBatchPages()} *
+                        tq4Layout.bytesPerModelPage() &&
+                tq4Storage.actualAllocatedBytes() ==
+                    tq4Storage.declaredBytes() &&
+                tq4Storage.residentPages() ==
+                    tq4Layout.sparseMappingBatchPages(),
+            "TQ4 sparse page backing did not honor its exact byte geometry");
+    require(tq4Storage.releaseBackingForPage(0),
+            "TQ4 extent could not be released");
+    tq4Storage.awaitRelease();
+    require(tq4Storage.actualAllocatedBytes() == 0 &&
+                tq4Storage.ensureResident(0) &&
+                tq4Storage.actualAllocatedBytes() ==
+                    tq4Storage.declaredBytes(),
+            "TQ4 extent could not be remapped on demand");
 
     std::cout << "q8 page storage tests passed\n";
 }
