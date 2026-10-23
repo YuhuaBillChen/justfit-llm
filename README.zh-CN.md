@@ -1,5 +1,8 @@
 <div align="center">
-  <img src="docs/assets/justfit-banner.svg" alt="JustFit — 面向 Apple silicon 的长上下文本地 LLM 推理" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="docs/assets/justfit-banner-mobile.svg">
+    <img src="docs/assets/justfit-banner.svg" alt="JustFit — 面向 Apple silicon 的长上下文本地 LLM 推理" width="100%">
+  </picture>
 
   [![测试版](https://img.shields.io/badge/TestPyPI-2.3.0rc24-087f78)](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)
   [![许可证：Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
@@ -20,7 +23,7 @@ JustFit 面向内存受限的 Mac，协调压缩上下文、常驻推测 draft�
 
 ## 实测结果
 
-<img src="docs/assets/system-comparison.png" alt="M4 Pro、M5 Pro、M6 的四代系统对比：已测上下文容量、16K prefill 和 decode 速度" width="100%">
+<a href="docs/assets/system-comparison.png"><img src="docs/assets/system-comparison.png" alt="M4 Pro、M5 Pro、M6 的四代系统对比：已测上下文容量、16K prefill 和 decode 速度" width="100%"></a>
 
 **容量和速度来自独立实验。** 实心柱是已测 B1 边界，斜线延伸到单独测量的 B2 总量。v1/v2 按各自 warm-prefix 协议均达到 320K 页容量；v2 的 draft 常驻。速度采用八道固定 SPEED-Bench 16K 题，每题强制输出 512 token；权重格式、decoder 和设备配置不同。M4 Pro/M5 Pro 是物理 24 GiB；M6 是物理 32 GiB，仅 v1/v2 的 B2 容量测试锁住 8 GiB，速度测试使用物理 32 GiB。
 
