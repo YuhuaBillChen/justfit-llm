@@ -1,49 +1,132 @@
-# JustFit 2.3
+<div align="center">
+  <img src="docs/assets/justfit-banner.svg" alt="JustFit — 面向 Apple silicon 的长上下文本地 LLM 推理" width="100%">
 
-面向 Apple silicon 的本地推理项目，协调 CPU、GPU 与 ANE，支持并发解码、
-持久化前缀缓存及按条件启用的 ANE 图像编码。基于 Splash 1.3.0，保留上游致谢和许可证。
+  [![测试版](https://img.shields.io/badge/TestPyPI-2.3.0rc24-087f78)](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)
+  [![许可证：Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
 
-当前为未公开发布的候选。验收状态以与产物完整哈希匹配的外部回执为准；
-安装软件包不会自动注册或启动服务。论文和网站仍保留占位。
+  **[开始使用](#开始使用) · [实测结果](#实测结果) · [文档导航](#文档导航) · [English](README.md)**
+</div>
 
-从 [Quickstart](QUICKSTART.md) 开始。Python wheel/sdist 提供 `justfit-llm`
-命令、源码与依赖；原生程序需要在支持的 Apple silicon 环境构建。
-安装 wheel 后运行 `justfit serve`，可创建工作区、查找工具链并编译、下载固定版本权重，然后在 `127.0.0.1:8000` 启动。需先具备兼容的 Xcode/CoreAI SDK 和 Metal 工具链；不会自动安装开发工具。ANE 编译图和本机缓存需要另行准备。
+JustFit 面向内存受限的 Mac，协调压缩上下文、常驻推测 draft、并发请求及 CPU/GPU/ANE，运行 **27B 语言与视觉模型**。所有计算共享同一份统一内存预算。
 
-也可显式提供与此源码包匹配的预编译运行时及SHA256，跳过本机编译；参见[运行时分发](docs/RUNTIME_DISTRIBUTION.md)。当前未配置公开默认下载地址；不能把本候选视作已上线的免工具链安装服务。
+**公开测试版：`2.3.0rc24`。** [源码](https://github.com/YuhuaBillChen/justfit-llm/tree/v2.3.0rc24)和 [TestPyPI 包](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)已发布。本测试版在本机编译原生程序；签名的预编译程序和按芯片区分的 ANE 下载正在准备。正式 PyPI `2.3.0` 尚未发布，论文仍在修订。
 
-`justfit serve` 可为至少24 GiB的 M4/M5/M6 自动选择预设；`scripts/run_local.py` 仍要求显式选择。参考配置：M4 Pro 使用 CPU 辅助 prefill；M5 Pro
-开启 GPU A8 prefill/verify；M6 额外开启语言 ANE FFN prefill。
-M6 有文本 prefill 时图像使用 GPU；无 prefill 的 decode 阶段才允许视觉 ANE。
-M4 Pro/M5 Pro 可在文本 prefill 或 decode 时按条件使用视觉 ANE。
+## JustFit 做什么
 
-4K/8K 是图像 patch 容量，不是文本上下文限制。缺少合格本机 profile、
-资产或内存准入时使用 GPU。目标是释放 GPU 给文本工作，不保证每张图片更快。
-按照 [ANE 资产准备指南](docs/ANE_PROVISIONING.md) 导出、离线编译并验收本机资产。
+- **保留长历史，也保留 draft。** warm-prefix 实验在两条同时存活的请求中达到 320K 聚合页容量，v2 保持推测 draft 常驻。这是 B2 已测容量，不是单请求 320K 或冷启动 prefill 的保证。
+- **让并发有空间。** 限制临时工作区、共享压缩页，在调度、持久化和冷重启间保留已提交的复合状态。
+- **让空闲加速器接活。** M4 Pro 使用 CPU 辅助 prefill，M5 Pro/M6 使用 GPU A8，并在阶段和内存允许时使用 ANE。视觉卸载旨在把 GPU 留给文本，不保证每张图更快。
+- **提供熟悉的接口。** OpenAI 兼容聊天、图像、流式输出、结构化输出，以及原生执行的 thinking budget 硬限制。
 
-[Thinking budget](docs/THINKING_BUDGET.md) 由原生运行时执行硬限制；
-前端与原生程序必须成对升级。外部 broker 如会重写请求，需要单独检查
-历史保留、工具消息配对和预算转发，参见[可选适配器](service/broker-integration/README.md)。
+## 实测结果
 
-参见[Python 安装](docs/PYPI.md)、[管理服务与回滚](docs/DEPLOYMENT.md)、
-[验证与限制](docs/VALIDATION.md)、[许可证](LICENSE)及[第三方声明](NOTICE)。
+<img src="docs/assets/system-comparison.png" alt="M4 Pro、M5 Pro、M6 的四代系统对比：已测上下文容量、16K prefill 和 decode 速度" width="100%">
 
-## 引用
+**容量和速度来自独立实验。** 实心柱是已测 B1 边界，斜线延伸到单独测量的 B2 总量。v1/v2 按各自 warm-prefix 协议均达到 320K 页容量；v2 的 draft 常驻。速度采用八道固定 SPEED-Bench 16K 题，每题强制输出 512 token；权重格式、decoder 和设备配置不同。M4 Pro/M5 Pro 是物理 24 GiB；M6 是物理 32 GiB，仅 v1/v2 的 B2 容量测试锁住 8 GiB，速度测试使用物理 32 GiB。
 
-如果 JustFit 对您的研究有帮助，请引用我们的论文：
+在这些配置的 16K 实验中，v2 的 decode 中位速度为 v1 的 **2.0–2.5 倍**；相对上游 Splash 1.3.0，prefill 提升 **9–46%**，单路 decode 下降 **2–9%**。这是完整系统对比，不能当作单机制收益或芯片代际排名。
 
-Yuhua Chen. *JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management*. 未发表稿，2026。
+[完整协议、速度和限制 →](docs/RESULTS.md)
+
+## 开始使用
+
+### 环境
+
+- **Apple silicon、macOS 27.0+、至少 24 GiB。** 参考配置为 M4 Pro、M5 Pro、M6，其他芯片变体没有逐一验收。
+- 推荐 **Python 3.12**；包声明兼容 Python 3.12–3.14。
+- 源码测试版需要兼容的 **Xcode/CoreAI SDK 与 Metal 编译工具链**。`justfit serve` 会查找已安装工具，不会替你安装 SDK。
+- 固定模型包约 **17.4 GB**，还需为依赖、编译输出和缓存留空间；已检查的模型 revision 无需 Hugging Face token 即可访问。
+
+Linux 可以安装 Python 工具，但不能运行这里的原生推理。独立 GPU 引擎的 macOS 26.4 源码目标不等于完整 Python/CoreAI 路径支持 26.4。
+
+### 安装已测试版本
+
+固定到测试版标签，建立独立环境。第三方依赖从正式 PyPI 安装，JustFit 单独从 TestPyPI 获取，避免混用依赖索引：
+
+```bash
+git clone --branch v2.3.0rc24 --depth 1 https://github.com/YuhuaBillChen/justfit-llm.git
+cd justfit-llm
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --index-url https://pypi.org/simple/ -r requirements-runtime.txt
+python -m pip install --no-deps --index-url https://test.pypi.org/simple/ justfit-llm==2.3.0rc24
+justfit verify
+justfit doctor
+justfit serve
+```
+
+首次运行会创建带版本的工作区、编译原生程序、下载并校验模型、选择设备预设，然后在 **`http://127.0.0.1:8000`** 提供服务。后续复用编译结果和模型；Ctrl+C 停止前台服务。没有视觉 ANE profile 时仍可使用 GPU 处理图像。
+
+若缺少 Metal 编译器，在安装兼容 Xcode 后执行 `xcodebuild -downloadComponent MetalToolchain`。[Quickstart](QUICKSTART.md)介绍工具路径、端口、本地模型和预编译包参数。公开测试版以标签为准，`main` 的文档会继续更新。
+
+### 发一个请求
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "incoai/Qwen3.8-27B-Splash",
+    "messages": [{"role": "user", "content": "17 乘以 19 是多少？"}],
+    "max_tokens": 64,
+    "reasoning_effort": "none"
+  }'
+```
+
+模型 ID 保留上游运行时包的名称，程序与 CLI 品牌是 JustFit。默认权重 revision 为 `9d27070b71f7142c6b6025f03ac011d70a73cb48`。
+
+## 四个机制
+
+| 机制 | 作用 |
+| --- | --- |
+| **KVExec** | 以有界重建和旋转域注意力消费压缩历史。 |
+| **PhaseSwap** | 管理组件和工作区生命周期，同时保持 draft 常驻。 |
+| **StateTrans** | 在调度和持久化间保留已提交的 KV、循环状态和 draft 状态。 |
+| **CrossFire** | 根据阶段所有权和内存准入协调 CPU、GPU 与 ANE。 |
+
+### ANE 如何参与
+
+| 参考预设 | 语言 prefill | 视觉 ANE 可用阶段 |
+| --- | --- | --- |
+| M4 Pro / `m4` | CPU 辅助 GPU | 文本 prefill 或 decode |
+| M5 Pro / `m5` | GPU A8 | 文本 prefill 或 decode |
+| M6 / `m6` | GPU A8＋ANE FFN | 无文本 prefill 的 decode 阶段 |
+
+视觉 ANE 需要验收过的 4K/8K 资产、匹配的芯片/系统 build 和内存准入。**4K/8K 是图像 patch 数，不是文本 token 数或屏幕像素。** 空闲请求、不支持的输入或资源不足时用 GPU。M6 优先保证语言 ANE prefill。[ANE 下载与安装接口](docs/ANE_DOWNLOADS.md)。
+
+## 文档导航
+
+| 需求 | 文档 |
+| --- | --- |
+| 安装、构建、选端口和模型 | [Quickstart](QUICKSTART.md) · [Python 安装](docs/PYPI.md) |
+| 看结果和验证范围 | [实验协议](docs/RESULTS.md) · [测试版验收摘要](docs/PREVIEW_VALIDATION.json) |
+| 修改设备配置 | [配置](docs/CONFIGURATION.md) · [ANE 策略](ANE_POLICY.md) |
+| 准备 ANE 与预编译运行时 | [ANE 安装](docs/ANE_DOWNLOADS.md) · [离线准备](docs/ANE_PROVISIONING.md) · [运行时分发](docs/RUNTIME_DISTRIBUTION.md) |
+| 管理服务与接入 broker | [部署和回滚](docs/DEPLOYMENT.md) · [适配器](service/broker-integration/README.md) |
+| 限制思考长度 | [Thinking budget](docs/THINKING_BUDGET.md) |
+| 反馈和贡献 | [Issues](https://github.com/YuhuaBillChen/justfit-llm/issues) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
+
+默认仅监听本机。对外网络部署需要认证、TLS 和访问控制，见安全说明。`source/` 是原生运行时与前端，`vision-tools/` 是 ANE 工具，`service/` 是可选管理服务。
+
+## 论文与引用
+
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management**，Yuhua Chen，2026。论文正在修订，作者审阅后补充公开 PDF 和 arXiv 链接；软件测试版不冻结论文。
+
+如果 JustFit 对你的研究有帮助，请引用：
 
 ```bibtex
 @unpublished{chen2026justfitv2,
   author = {Chen, Yuhua},
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
-  note = {Unpublished manuscript}
+  note = {Manuscript in preparation}
 }
 ```
 
-[CITATION.cff](CITATION.cff) 提供机器可读的引用信息。论文公开后补充链接及编号。
+[机器可读引用信息](CITATION.cff) · [JustFit v1 论文](https://arxiv.org/abs/2609.17475)
 
-预编译 ANE 4K／8K 资产可独立下载并校验安装，具体芯片和系统版本必须匹配；
-流程见 [ANE 下载与安装](docs/ANE_DOWNLOADS.md)。安装器不编译图，也不清理已有缓存。
+## 致谢与许可证
+
+JustFit 原生运行时基于 **[Splash 1.3.0](https://github.com/incoai/splash)**。上游作者和实现贡献保留在 [NOTICE](NOTICE) 与[第三方声明](source/THIRD_PARTY_NOTICES)中。权重和衍生资产保留各自许可证。
+
+代码采用 [Apache 2.0](LICENSE)。JustFit 的问题由本项目维护者处理，请向本仓库提交反馈。

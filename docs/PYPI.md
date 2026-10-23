@@ -6,12 +6,14 @@ It does not ship a precompiled native executable, Metal libraries, model weights
 or machine-specific ANE caches. Installation does not compile code, download
 models, register services or modify existing services.
 
-## Install the local candidate
+## Install the preview or a downloaded wheel
 
 Use Python 3.12–3.14 in a new virtual environment without
-`--system-site-packages`. Do not reuse a model-export or research environment. Until publication, install the
-reviewed local wheel; `pip install justfit-llm` from the public index is not yet
-an accepted path and might refer to an unrelated or unavailable project.
+`--system-site-packages`. Do not reuse a model-export or research environment. The public preview is `2.3.0rc24` on TestPyPI. Formal PyPI `2.3.0` is not published;
+do not use an unqualified `pip install justfit-llm` as the current installation path.
+Follow the index-separated commands in the [README](../README.md#get-started),
+using the immutable `v2.3.0rc24` tag for the matching dependency file.
+The local-wheel commands below are an alternative for an already downloaded artifact.
 
 ## One command
 
@@ -25,7 +27,7 @@ On first run `serve` creates a workspace under
 `~/Library/Application Support/JustFit/<version>`, builds the native runtime with
 the Metal toolchain it finds (install one with
 `xcodebuild -downloadComponent MetalToolchain` if none is found), downloads and
-verifies `incoai/Qwen3.8-27B-Splash` at the qualified revision (about 16 GB),
+verifies `incoai/Qwen3.8-27B-Splash` at the qualified revision (about 17.4 GB),
 picks the `m4`, `m5` or `m6` preset from the chip and memory size, and listens on
 `127.0.0.1:8000`. Later runs verify workspace sources and compiled-output receipts, then reuse the build and pinned model. A failed integrity check prevents execution. Every step can
 be overridden with `--project`, `--metal-bin`, `--model`, `--node` and `--port`.
@@ -88,11 +90,12 @@ The exact installed candidate must additionally pass a clean Mac build and
 text/image/stream/hard-budget smoke before public installability is claimed.
 Do not reuse a running production deployment as proof of the new installation.
 
-TestPyPI upload requires a separately authorized target/account; no upload is
-performed by the build. After a reviewed TestPyPI upload, download the exact
+The RC24 TestPyPI upload and a fresh Mac index-install test are complete; see
+[preview validation](PREVIEW_VALIDATION.json). Future uploads still require the
+reviewed publisher workflow; a local build does not upload anything. After a reviewed TestPyPI upload, download the exact
 version with `pip download --no-deps --index-url https://test.pypi.org/simple/`
 and compare the artifact hash before installing it with dependencies resolved
 from the normal trusted index. This avoids mixing dependency indexes.
 Formal PyPI upload and GitHub/HF publication are separate explicit actions.
-Paper and website remain placeholders pending coordinated release.
+The paper remains under author revision; GitHub is the current project homepage.
 

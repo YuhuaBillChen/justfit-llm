@@ -1,0 +1,59 @@
+{
+  "version": "2.3.0rc24",
+  "qualified_source_ref": "v2.3.0rc24",
+  "qualified_source_commit": "9e3b683f477e5f14e9a69e0f88efc017e5f1227a",
+  "scope": "Preview installation and functional checks; not a new performance experiment or a guarantee of absence of vulnerabilities.",
+  "reference_devices": [
+    "Apple M4 Pro",
+    "Apple M5 Pro",
+    "Apple M6"
+  ],
+  "macos": "27.0.1",
+  "os_build": "26A434",
+  "python": "3.12",
+  "per_device_checks": {
+    "source_tests": 113,
+    "service_tests": 15,
+    "installation_lifecycle_steps": 30,
+    "synthetic_images": 2,
+    "thinking_budget_tokens": 8,
+    "cold_restart_equal_output": true,
+    "cold_restart_disk_kv_tokens": 8704
+  },
+  "ane_qualification": {
+    "tiers": [
+      4096,
+      8192
+    ],
+    "empty_simulated_user_cache": true,
+    "https_delivery_with_certificate_verification": true,
+    "full_tower_bf16_equal_to_reference": true,
+    "groups_per_tower": 9,
+    "full_ane_no_gpu": true,
+    "compiled_files_unchanged": 90,
+    "scope": "Exact evaluated chips/OS build; local delivery test, not public download availability."
+  },
+  "testpypi": {
+    "url": "https://test.pypi.org/project/justfit-llm/2.3.0rc24/",
+    "workflow": "https://github.com/YuhuaBillChen/justfit-llm/actions/runs/40037135536",
+    "download_verified": true,
+    "mac_actual_index_install": true,
+    "artifacts": [
+      {
+        "file": "justfit_llm-2.3.0rc24-py3-none-any.whl",
+        "sha256": "2b032bbdb2983c5d9a5285893f6d0f89deddf3940ad94cb1797c619d86a05a56",
+        "local_sha256": "6c6cc39090980658166d1aef31025ffd4d7256add4ee078e42010143b7dbdc33",
+        "all_member_bytes_identical_to_qualified_local_artifact": true
+      },
+      {
+        "file": "justfit_llm-2.3.0rc24.tar.gz",
+        "sha256": "8c49c6c243dacb8a60029556e6d5c851604b1ed859c66c3f39d084ec786d699d",
+        "local_sha256": "7ac7021bc494ed8972618cbbae64925e666d151d0574487cee1b2ec8f7ed5b84",
+        "all_member_bytes_identical_to_qualified_local_artifact": true
+      }
+    ]
+  },
+  "formal_pypi_published": false,
+  "public_signed_native_downloads": false,
+  "paper_status": "under author revision"
+}
