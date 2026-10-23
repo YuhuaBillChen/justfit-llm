@@ -1,0 +1,19 @@
+{
+  "version": "2.3.0rc24",
+  "publicly_released": false,
+  "index_uploaded": false,
+  "paper": "placeholder",
+  "website": "placeholder",
+  "artifact_acceptance": "See the external receipt matching the full artifact SHA256. This source snapshot does not certify itself.",
+  "required_checks": [
+    "Archive integrity and source/service tests",
+    "Fresh wheel and sdist installation on supported platforms",
+    "Apple silicon native build and device-specific ANE qualification",
+    "Package-index upload/download verification before claiming public installation support"
+  ],
+  "limitations": [
+    "Local installation does not establish public index availability.",
+    "Device profiles require local assets and qualification.",
+    "No broad quality equivalence or zero-vulnerability guarantee."
+  ]
+}

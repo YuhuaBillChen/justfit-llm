@@ -1,0 +1,17 @@
+diff --git a/ai_service/broker/request_rewrite.py b/ai_service/broker/request_rewrite.py
+index cdf4d84..485b041 100644
+--- a/ai_service/broker/request_rewrite.py
++++ b/ai_service/broker/request_rewrite.py
+@@ -470,7 +470,11 @@ def rewrite_chat_request(
+ 
+     image_limit_applied: Optional[int] = None
+     dropped_messages = 0
+-    if contains_image and backend_name == "vlm":
++    # JustFit validates the fully rendered context itself. The legacy MLX image
++    # estimate omits reasoning/tool fields and deleting individual messages can
++    # break tool pairs and every cached prefix after the system prompt.
++    justfit_target = updated.get("model") == "incoai/Qwen3.8-27B-Splash"
++    if contains_image and backend_name == "vlm" and not justfit_target:
+         image_limit_applied = resolve_image_prompt_limit(public_model_id)
+         updated, limit_changed = _clamp_image_limits(updated, image_limit_applied)
+         if limit_changed:

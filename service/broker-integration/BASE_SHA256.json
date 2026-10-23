@@ -1,0 +1,6 @@
+{
+  "target": "ai_service/broker/request_rewrite.py",
+  "before": "ebc59d773a7143756eb26497c3f2f4d744b13c0ae4700fe05af6554860ef0642",
+  "after": "8239bbe50188f42b1398ed98494811f3a4fde4e03a0c6bd8e7c334bebb339838",
+  "scope": "Optional external broker adapter; compare source identity before applying."
+}

@@ -1,0 +1,14 @@
+{
+  "project": "JustFit",
+  "project_version": "2.3.0rc24",
+  "upstream_project": "Splash",
+  "upstream_version": "1.3.0",
+  "upstream_commit": "0d5a035ea26d1cc566e3c7ee4e08e5e06fa68cf7",
+  "source_identity": "package-manifest.json pins the complete modified source tree; optional integration patches are not the complete upstream-to-JustFit diff.",
+  "attribution": [
+    "LICENSE",
+    "NOTICE",
+    "source/THIRD_PARTY_NOTICES"
+  ],
+  "optional_integrations": "service/broker-integration contains version-specific external adapter patches, not a standalone broker."
+}

@@ -1,0 +1,14 @@
+JustFit 2.3 is derived from Splash 1.3.0.
+Upstream: https://github.com/incoai/splash
+Pinned upstream commit: 0d5a035ea26d1cc566e3c7ee4e08e5e06fa68cf7
+
+This distribution contains modified runtime/frontend code and additional JustFit
+workers, service integration and release tooling. See ORIGIN.json and CHANGELOG.md.
+The upstream Apache-2.0 license, THIRD_PARTY_NOTICES and inline notices are retained.
+Model weights and machine-specific compiled assets are not included.
+
+JustFit product identity: the modified engine is named justfit-engine; its GPU
+libraries are justfit.metallib and justfit-verify16.metallib. The Python commands
+are justfit and justfit-llm. These names do not imply upstream endorsement.
+Published upstream model repository names and packed-weight format identifiers
+are retained for compatibility. Modified source files carry JustFit notices.

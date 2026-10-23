@@ -1,0 +1,13 @@
+--- a/ai_service/broker/openai_pool_broker.py
++++ b/ai_service/broker/openai_pool_broker.py
+@@ -908,7 +908,9 @@
+                     # ledger; it has no shared_gpu_broker-style _active_jobs
+                     # map.  Use a locked snapshot so the local llama-swap
+                     # health fallback cannot crash routing with AttributeError.
+-                    with self._routing_lock:
++                    # Routing waits for this probe while holding _routing_lock.
++                    # The ledger's readers and writers use _cache_lock.
++                    with self._cache_lock:
+                         active_reservations = [
+                             reservation
+                             for reservation in self._inflight_reservations.values()

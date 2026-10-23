@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+source/build/
+local-state/
+*.dylib
+build-receipt.json
+*.zip
+.env
