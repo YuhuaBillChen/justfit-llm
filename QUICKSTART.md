@@ -3,6 +3,27 @@
 Run all commands from this directory. These commands build and run JustFit from
 this archive; no global installation or service registration is performed.
 
+## Public preview
+
+The tested preview is [2.3.0rc24 on TestPyPI](https://test.pypi.org/project/justfit-llm/2.3.0rc24/).
+For a pinned environment, first check out `v2.3.0rc24`. Install dependencies from
+PyPI and JustFit separately from TestPyPI:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --index-url https://pypi.org/simple/ -r requirements-runtime.txt
+python -m pip install --no-deps --index-url https://test.pypi.org/simple/ justfit-llm==2.3.0rc24
+justfit verify
+justfit doctor
+justfit serve
+```
+
+Use compatible Xcode/CoreAI and Metal tools on macOS 27+ Apple silicon.
+Signed prebuilt downloads and formal PyPI 2.3.0 are still being prepared.
+The immutable tag and public wheel keep their original source identity;
+`main` documentation updates do not change that wheel.
+
 ## Installed wheel: one command
 
 After installing the reviewed wheel in a clean Python environment:
