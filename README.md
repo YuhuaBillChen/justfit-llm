@@ -1,5 +1,8 @@
 <div align="center">
-  <img src="docs/assets/justfit-banner.svg" alt="JustFit — long-context LLM serving on Apple silicon" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="docs/assets/justfit-banner-mobile.svg">
+    <img src="docs/assets/justfit-banner.svg" alt="JustFit — long-context LLM serving on Apple silicon" width="100%">
+  </picture>
 
   [![Preview](https://img.shields.io/badge/TestPyPI-2.3.0rc24-087f78)](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)
   [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
@@ -21,7 +24,7 @@ JustFit is a local inference system for serving a **27B language-and-vision mode
 
 ## Measured results
 
-<img src="docs/assets/system-comparison.png" alt="Four-system comparison on M4 Pro, M5 Pro and M6: tested retained context, 16K prefill and 16K decode rates" width="100%">
+<a href="docs/assets/system-comparison.png"><img src="docs/assets/system-comparison.png" alt="Four-system comparison on M4 Pro, M5 Pro and M6: tested retained context, 16K prefill and 16K decode rates" width="100%"></a>
 
 **Capacity and speed are separate experiments.** Solid bars show tested B1 bounds; hatching extends them to the B2 total. Both JustFit generations reach a 320K page capacity using their respective warm-prefix protocols; v2 retains its draft. Speed uses eight fixed SPEED-Bench 16K tasks with 512 forced output tokens. Weight formats, decoders and profiles differ. M4 Pro/M5 Pro have physical 24 GiB; M6 has physical 32 GiB, with 8 GiB locked only for the v1/v2 B2 capacity tests. M6 speed runs use physical 32 GiB.
 
