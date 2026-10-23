@@ -1,0 +1,278 @@
+"""Prepare PDF pages as text and images for the existing vision prompt path."""
+
+import base64
+import hashlib
+import io
+import math
+import threading
+import time
+from contextlib import closing
+from dataclasses import asdict, dataclass
+
+from .errors import APIError
+from .lru import LRUCache
+from .protocol import MAX_IMAGE_SPANS
+
+MAX_REQUEST_DOCUMENT_BYTES = 64 * 1024 * 1024
+MAX_PDF_BYTES = MAX_REQUEST_DOCUMENT_BYTES
+# Every rendered page becomes one image in the native request.
+MAX_PAGES = MAX_IMAGE_SPANS
+MAX_PAGE_PIXELS = 1024 * 1024
+MAX_TEXT_CHARACTERS = 1_000_000
+MAX_RENDERED_BYTES = 32 * 1024 * 1024
+CACHE_BYTES = 64 * 1024 * 1024
+CACHE_ENTRIES = 16
+PDF_DATA_URL_PREFIX = "data:application/pdf;base64,"
+
+
+@dataclass(slots=True)
+class DocumentBudget:
+    # The request's deadline; math.inf when it has none.
+    deadline: float
+    remaining_bytes: int = MAX_REQUEST_DOCUMENT_BYTES
+    remaining_pages: int = MAX_PAGES
+
+    def remaining_time(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise APIError(504, "request timed out", "request_timeout")
+        return remaining
+
+    def charge(self, size):
+        self.remaining_time()
+        if size > self.remaining_bytes:
+            raise APIError(
+                400,
+                "PDF sources and rendered pages exceed the shared request size limit",
+            )
+        self.remaining_bytes -= size
+
+    def charge_pages(self, count):
+        if count > self.remaining_pages:
+            raise APIError(400, "documents exceed the request page limit")
+        self.remaining_pages -= count
+
+
+@dataclass(frozen=True, slots=True)
+class Page:
+    text: str
+    image_url: str
+
+    @property
+    def size(self):
+        return len(self.text) * 4 + len(self.image_url)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderLimits:
+    pages: int
+    page_pixels: int
+    text_characters: int
+    rendered_bytes: int
+    request_bytes: int
+
+
+# One bounded PDF worker runs at a time. A request decodes, hashes and looks
+# up its PDF before it waits for the worker, so a cached PDF never waits
+# behind another one's render.
+_render_lock = threading.Lock()
+# Rendered pages by the SHA-256 of their PDF.
+_cache_lock = threading.Lock()
+_cache = LRUCache(CACHE_BYTES, CACHE_ENTRIES)
+
+
+def _render(payload, budget):
+    from .document_worker import render
+
+    limits = RenderLimits(
+        min(MAX_PAGES, budget.remaining_pages),
+        MAX_PAGE_PIXELS,
+        MAX_TEXT_CHARACTERS,
+        MAX_RENDERED_BYTES,
+        budget.remaining_bytes,
+    )
+    values = render(payload, asdict(limits), budget.remaining_time())
+    pages = tuple(Page(**value) for value in values)
+    budget.charge(sum(page.size for page in pages))
+    return pages
+
+
+def render_pages(payload, budget, limits):
+    import pypdfium2 as pdfium
+
+    try:
+        budget.remaining_time()
+        with pdfium.PdfDocument(payload) as document:
+            document.init_forms()
+            if not 1 <= len(document) <= limits.pages:
+                raise APIError(
+                    400, f"PDF documents must contain 1–{limits.pages} pages"
+                )
+            pages = []
+            total_characters = total_bytes = 0
+            for index in range(len(document)):
+                budget.remaining_time()
+                with closing(document[index]) as page:
+                    width, height = page.get_size()
+                    if (
+                        not all(
+                            math.isfinite(side) and side > 0 for side in (width, height)
+                        )
+                        or max(width, height) / min(width, height) > 200
+                    ):
+                        raise APIError(400, "PDF page dimensions are invalid")
+                    with closing(page.get_textpage()) as text_page:
+                        total_characters += text_page.count_chars()
+                        if total_characters > limits.text_characters:
+                            raise APIError(400, "PDF text exceeds the size limit")
+                        text = text_page.get_text_bounded().strip()
+                    scale = min(2.0, math.sqrt(limits.page_pixels / width / height))
+                    while (
+                        math.ceil(width * scale) * math.ceil(height * scale)
+                        > limits.page_pixels
+                    ):
+                        scale *= 0.99
+                    with (
+                        closing(
+                            page.render(
+                                scale=scale, rev_byteorder=True, limit_image_cache=True
+                            )
+                        ) as bitmap,
+                        bitmap.to_pil() as image,
+                    ):
+                        buffer = io.BytesIO()
+                        image.save(buffer, format="PNG")
+                    image_url = "data:image/png;base64," + base64.b64encode(
+                        buffer.getvalue()
+                    ).decode("ascii")
+                    prepared = Page(f"PDF page {index + 1}:\n{text}\n", image_url)
+                    total_bytes += prepared.size
+                    budget.charge(prepared.size)
+                    if total_bytes > limits.rendered_bytes:
+                        raise APIError(400, "rendered PDF exceeds the size limit")
+                    pages.append(prepared)
+            return tuple(pages)
+    except APIError:
+        raise
+    except pdfium.PdfiumError as error:
+        if error.err_code == pdfium.raw.FPDF_ERR_PASSWORD:
+            raise APIError(
+                400, "PDF documents requiring an opening password are not supported"
+            ) from error
+        if error.err_code == pdfium.raw.FPDF_ERR_SECURITY:
+            raise APIError(400, "PDF security handler is not supported") from error
+        raise APIError(400, "PDF document could not be decoded") from error
+    except (ValueError, OverflowError) as error:
+        raise APIError(400, "PDF document could not be rendered") from error
+
+
+def _cached(key, budget):
+    """The cached pages of the PDF with digest `key`, charged to `budget`;
+    None when none are cached."""
+    with _cache_lock:
+        pages = _cache.get(key)
+    if pages is None:
+        return None
+    budget.charge_pages(len(pages))
+    budget.charge(sum(page.size for page in pages))
+    return pages
+
+
+def _cache_pages(key, pages):
+    """Keep the rendered `pages` of the PDF with digest `key`, unless they
+    alone outgrow the cache."""
+    size = sum(page.size for page in pages)
+    with _cache_lock:
+        _cache.put(key, pages, size)
+
+
+def _pages(encoded, budget):
+    budget.remaining_time()
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except ValueError as error:
+        raise APIError(400, "PDF data is not valid base64") from error
+    if len(payload) > MAX_PDF_BYTES:
+        raise APIError(400, "PDF document exceeds the size limit")
+    budget.charge(len(payload))
+    key = hashlib.sha256(payload).digest()
+    if (pages := _cached(key, budget)) is not None:
+        return pages
+    if not _render_lock.acquire(
+        timeout=min(budget.remaining_time(), threading.TIMEOUT_MAX)
+    ):
+        raise APIError(504, "request timed out", "request_timeout")
+    try:
+        # Another request may have rendered the same PDF meanwhile.
+        if (pages := _cached(key, budget)) is not None:
+            return pages
+        pages = _render(payload, budget)
+        budget.charge_pages(len(pages))
+        _cache_pages(key, pages)
+        return pages
+    finally:
+        _render_lock.release()
+
+
+def document_parts(block):
+    """An Anthropic PDF document block as canonical text and file parts.
+
+    Only the block is checked here. Request preparation renders the file with
+    the request's shared document budget, like every other PDF, or rejects it
+    when the model serves without vision."""
+    source = block.get("source")
+    if (
+        not isinstance(source, dict)
+        or source.get("type") != "base64"
+        or source.get("media_type") != "application/pdf"
+    ):
+        raise APIError(400, "documents require a base64 application/pdf source")
+    citations = block.get("citations")
+    if citations is not None and (
+        not isinstance(citations, dict) or citations.get("enabled", False) is not False
+    ):
+        raise APIError(400, "document citations are not supported")
+    parts = []
+    for field in ("title", "context"):
+        value = block.get(field)
+        if value is not None:
+            if not isinstance(value, str):
+                raise APIError(400, f"document {field} must be a string")
+            parts.append({"type": "text", "text": value + "\n"})
+    encoded = source.get("data")
+    if not isinstance(encoded, str):
+        raise APIError(400, "PDF data must be a base64 string")
+    parts.append({"type": "file", "file": {"file_data": PDF_DATA_URL_PREFIX + encoded}})
+    return parts
+
+
+def pdf_content(encoded, *, budget):
+    """Render an inline PDF through the shared bounded document pipeline."""
+    if len(encoded) > 4 * ((MAX_PDF_BYTES + 2) // 3):
+        raise APIError(400, "PDF document exceeds the size limit")
+    parts = []
+    for page in _pages(encoded, budget):
+        parts.append({"type": "text", "text": page.text})
+        parts.append({"type": "image_url", "image_url": {"url": page.image_url}})
+    return parts
+
+
+def file_content(file, *, budget):
+    """Render a file part's inline PDF as canonical text/image parts."""
+    if not isinstance(file, dict):
+        raise APIError(400, "file must be an object")
+    if file.get("file_id") is not None or file.get("file_url") is not None:
+        raise APIError(
+            400, "file_id and file_url are not supported; use inline file_data"
+        )
+    filename = file.get("filename")
+    if filename is not None and not isinstance(filename, str):
+        raise APIError(400, "filename must be a string")
+    data = file.get("file_data")
+    if not isinstance(data, str):
+        raise APIError(400, "file_data must contain a base64 PDF")
+    if data.startswith("data:"):
+        if not data.startswith(PDF_DATA_URL_PREFIX):
+            raise APIError(400, "only application/pdf file data is supported")
+        data = data[len(PDF_DATA_URL_PREFIX) :]
+    return pdf_content(data, budget=budget)

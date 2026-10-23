@@ -1,0 +1,18 @@
+include CITATION.cff
+include *.md *.json *.py *.toml *.txt .gitignore MANIFEST.in
+recursive-include source *
+recursive-include vision-tools *
+recursive-include service *
+recursive-include tests *
+recursive-include scripts *
+recursive-include config *
+recursive-include docs *
+recursive-include paper *
+recursive-include website *
+recursive-include python *.py
+prune build
+prune dist
+prune source/build
+prune source/.venv
+prune source/venv
+global-exclude __pycache__ *.pyc *.dylib .DS_Store

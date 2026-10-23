@@ -1,0 +1,31 @@
+[
+  {
+    "capacity": 4096,
+    "image": "small.png",
+    "expected": {
+      "label": "BETA",
+      "value": 39
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Which label has the largest number of completed jobs? Return only JSON with keys label and value."
+      }
+    ]
+  },
+  {
+    "capacity": 8192,
+    "image": "1080p.png",
+    "expected": {
+      "completed_orders": 184,
+      "area": "EAST",
+      "crates_ready": 67
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Read the dashboard. Return only JSON with completed_orders from the summary card, area with the largest CRATES READY count in the table, and that crates_ready count. Use exactly those three keys."
+      }
+    ]
+  }
+]

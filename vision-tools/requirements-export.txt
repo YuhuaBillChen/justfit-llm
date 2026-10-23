@@ -1,0 +1,6 @@
+# Offline export environment; keep separate from source/.venv (numpy 2.5).
+coreai-torch==0.4.3
+coreai-core==1.0.0b3
+torch==2.14.1
+numpy==2.4.6
+Pillow==13.0.0

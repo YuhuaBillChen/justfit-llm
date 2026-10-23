@@ -1,0 +1,24 @@
+// Modified for JustFit: product identity and integration.
+#pragma once
+
+// Parameter layouts shared by host dispatch code and Metal kernels.
+#include "metal/abi/DraftAttention.h"
+#ifdef __METAL_VERSION__
+#include <metal_stdlib>
+#else
+#include <stdint.h>
+#endif
+
+// Rotary pairs in a row of the RoPE tables (ops::RoPE), which the attention
+// kernels read: the target rotates 64 of its 256 head dimensions (Qwen3.5's
+// partial rotary factor 1/4), the draft its whole head.
+#define JUSTFIT_TARGET_ROPE_PAIRS 32u
+#define JUSTFIT_DRAFT_ROPE_PAIRS (JUSTFIT_DRAFT_HEAD_DIMENSION / 2u)
+
+struct RopeTableParams {
+  uint32_t target_rows;
+  uint32_t draft_rows;
+};
+
+static_assert(sizeof(RopeTableParams) == 8,
+              "RoPE table parameters are 8 bytes on both sides");

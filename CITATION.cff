@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If JustFit supports your research, please cite the paper listed in preferred-citation."
+type: software
+title: JustFit
+authors:
+  - family-names: Chen
+    given-names: Yuhua
+preferred-citation:
+  type: unpublished
+  title: "JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management"
+  authors:
+    - family-names: Chen
+      given-names: Yuhua
+  year: 2026
+  notes: "Unpublished manuscript; public link and identifier pending."
