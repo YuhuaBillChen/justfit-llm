@@ -12,7 +12,7 @@
 
 JustFit 面向内存受限的 Mac，协调压缩上下文、常驻推测 draft、并发请求及 CPU/GPU/ANE，运行 **27B 语言与视觉模型**。所有计算共享同一份统一内存预算。
 
-**正式版本号：`2.3.0`。** 此源码树用于正式发布准备，索引和下载资产尚待上传。请使用随候选交付的已审 wheel 与原生运行时；原 [RC24 测试版](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)单独保留。
+**2.3.0 已发布到 [GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)**，包括源码、Python 包、Apple 公证的原生运行时和六份 ANE 包。[TestPyPI 2.3.0](https://test.pypi.org/project/justfit-llm/2.3.0/) 已完成真实 Mac 安装验收；正式 PyPI 发布等待 Trusted Publisher 配置。
 
 ## JustFit 做什么
 
@@ -37,29 +37,32 @@ JustFit 面向内存受限的 Mac，协调压缩上下文、常驻推测 draft�
 
 - **Apple silicon、macOS 27.0+、至少 24 GiB。** 参考配置为 M4 Pro、M5 Pro、M6，其他芯片变体没有逐一验收。
 - 推荐 **Python 3.12**；包声明兼容 Python 3.12–3.14。
-- 源码测试版需要兼容的 **Xcode/CoreAI SDK 与 Metal 编译工具链**。`justfit serve` 会查找已安装工具，不会替你安装 SDK。
+- 下方预编译安装路径无需本机编译。源码构建另需兼容的 **Xcode/CoreAI SDK 与 Metal 编译工具链**。
 - 固定模型包约 **17.4 GB**，还需为依赖、编译输出和缓存留空间；已检查的模型 revision 无需 Hugging Face token 即可访问。
 
 Linux 可以安装 Python 工具，但不能运行这里的原生推理。独立 GPU 引擎的 macOS 26.4 源码目标不等于完整 Python/CoreAI 路径支持 26.4。
 
 ### 安装已测试版本
 
-建立独立环境，安装与此源码一起下载的已审 wheel：
+从 [2.3.0 Release](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0) 下载 wheel，在 wheel 所在目录建立独立环境：
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install --index-url https://pypi.org/simple/ -r requirements-runtime.txt
 python -m pip install ./justfit_llm-2.3.0-py3-none-any.whl
 justfit verify
 justfit doctor
-justfit serve
+justfit serve \
+  --runtime-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/runtime-manifest.json \
+  --runtime-sha256 f759236b3f78766bd41d47c75b399d6bca0f56ba9d6b39dd83c705f74206aa3c \
+  --ane-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/ane-index.json \
+  --ane-manifest-sha256 fd1b71cfa9d4e785741dc2e0ba4d43f2a4dd556a62c0a61f37838b7f9e3ec99d
 ```
 
-首次运行会创建带版本的工作区、编译原生程序、下载并校验模型、选择设备预设，然后在 **`http://127.0.0.1:8000`** 提供服务。后续复用编译结果和模型；Ctrl+C 停止前台服务。没有视觉 ANE profile 时仍可使用 GPU 处理图像。
+首次运行按以上参数下载并校验配套的预编译运行时、匹配的 ANE 包和固定模型，然后在 **`http://127.0.0.1:8000`** 提供服务。ANE 包要求精确匹配芯片与 macOS build `26A434`，其他系统可省略 ANE 两个参数使用 GPU 视觉。后续运行 `justfit serve` 复用已安装内容；Ctrl+C 停止前台服务。
 
-若缺少 Metal 编译器，在安装兼容 Xcode 后执行 `xcodebuild -downloadComponent MetalToolchain`。[Quickstart](QUICKSTART.md)介绍工具路径、端口、本地模型和预编译包参数。使用配套的 2.3.0 运行时和公开 SHA256 可跳过本机编译，具体见链接说明。
+未提供运行时参数且没有已安装运行时的首次运行会走源码编译路径，需要开发工具。[Quickstart](QUICKSTART.md) 提供源码构建、端口和模型配置。
 
 ### 发一个请求
 

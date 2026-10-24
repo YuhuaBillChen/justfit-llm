@@ -13,7 +13,7 @@
 
 JustFit is a local inference system for serving a **27B language-and-vision model on memory-constrained Macs**. It coordinates compressed context, a resident speculative draft, concurrent requests and CPU/GPU/ANE work under one unified-memory budget.
 
-**Stable version: `2.3.0`.** This source tree prepares the stable release. Package-index and release-asset publication are pending; use the reviewed wheel and native runtime supplied with this release candidate. The immutable [RC24 preview](https://test.pypi.org/project/justfit-llm/2.3.0rc24/) remains available separately.
+**[2.3.0 is available on GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)** with source, Python packages, an Apple-notarized native runtime and six ANE bundles. [TestPyPI 2.3.0](https://test.pypi.org/project/justfit-llm/2.3.0/) has passed a real Mac installation round trip; production PyPI publication awaits Trusted Publisher configuration.
 
 ## Why JustFit
 
@@ -38,29 +38,32 @@ At 16K, v2's median decode rate is **2.0–2.5× the v1 rate** across these conf
 
 - **Apple silicon and macOS 27.0+.** Reference configurations: M4 Pro, M5 Pro and M6, with at least 24 GiB. Other chip variants are not individually qualified.
 - **Python 3.12 recommended**; the package declares support for Python 3.12–3.14.
-- **Compatible Xcode/CoreAI SDK and Metal compiler toolchain** for this source preview. `justfit serve` finds installed tools; it does not install Xcode or the SDK.
+- The prebuilt installation below requires no local compilation. Building from source separately requires a **compatible Xcode/CoreAI SDK and Metal compiler toolchain**.
 - Internet access and storage for the pinned model pack: approximately **17.4 GB**, plus dependencies, build outputs and caches. The model repository is publicly accessible without a Hugging Face token at the checked revision.
 
 Installing the Python package on Linux does not enable native inference there. The standalone GPU engine's macOS 26.4 source target is separate from this complete macOS 27/CoreAI setup.
 
 ### Install the reviewed release
 
-Create a fresh environment. Install the reviewed wheel downloaded alongside this source tree:
+Download the wheel from the [2.3.0 Release](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0), then create a fresh environment in its download directory:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install --index-url https://pypi.org/simple/ -r requirements-runtime.txt
 python -m pip install ./justfit_llm-2.3.0-py3-none-any.whl
 justfit verify
 justfit doctor
-justfit serve
+justfit serve \
+  --runtime-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/runtime-manifest.json \
+  --runtime-sha256 f759236b3f78766bd41d47c75b399d6bca0f56ba9d6b39dd83c705f74206aa3c \
+  --ane-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/ane-index.json \
+  --ane-manifest-sha256 fd1b71cfa9d4e785741dc2e0ba4d43f2a4dd556a62c0a61f37838b7f9e3ec99d
 ```
 
-First run: create a versioned workspace, build the native runtime, download and verify the pinned model, choose the device preset, then serve on **`http://127.0.0.1:8000`**. Later runs reuse the build and model. Ctrl+C stops the foreground server. GPU vision works without a compiled ANE vision profile.
+First run with these options downloads and verifies the prebuilt runtime, matching ANE assets and pinned model, then serves on **`http://127.0.0.1:8000`**. ANE bundles require an exact chip and macOS build `26A434` match; on other builds, omit the two ANE options to use GPU vision. Later runs of `justfit serve` reuse installed components. Ctrl+C stops the foreground server.
 
-If the Metal compiler is missing, install the component with `xcodebuild -downloadComponent MetalToolchain` after installing compatible Xcode. [Step-by-step setup and overrides](QUICKSTART.md) cover custom ports, local models and prebuilt-runtime inputs. Use the matching 2.3.0 runtime and published SHA256 to skip local compilation; see the linked instructions.
+A first run without runtime options or an installed runtime uses the source-build path and requires developer tools. [Quickstart](QUICKSTART.md) covers source builds, ports and models.
 
 ### Send a request
 
