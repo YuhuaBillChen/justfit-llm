@@ -12,7 +12,7 @@
 
 JustFit 面向内存受限的 Mac，协调压缩上下文、常驻推测 draft、并发请求及 CPU/GPU/ANE，运行 **27B 语言与视觉模型**。所有计算共享同一份统一内存预算。
 
-**2.3.0 已发布到 [GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)**，包括源码、Python 包、Apple 公证的原生运行时和六份 ANE 包。[TestPyPI 2.3.0](https://test.pypi.org/project/justfit-llm/2.3.0/) 已完成真实 Mac 安装验收；正式 PyPI 发布等待 Trusted Publisher 配置。
+**2.3.0 已发布到 [GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)**，包括源码、Python 包、Apple 公证的原生运行时和六份 ANE 包。[正式 PyPI 2.3.0](https://pypi.org/project/justfit-llm/2.3.0/) 也已上线，按下方命令安装。
 
 ## JustFit 做什么
 
@@ -44,13 +44,13 @@ Linux 可以安装 Python 工具，但不能运行这里的原生推理。独立
 
 ### 安装已测试版本
 
-从 [2.3.0 Release](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0) 下载 wheel，在 wheel 所在目录建立独立环境：
+建立独立环境，从正式 PyPI 安装固定版本：
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install ./justfit_llm-2.3.0-py3-none-any.whl
+python -m pip install justfit-llm==2.3.0
 justfit verify
 justfit doctor
 justfit serve \
@@ -114,7 +114,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 论文与引用
 
-**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management**，Yuhua Chen，2026。**[阅读预印本 PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf)** · [论文与引用文件](paper/README.md)。此日期版本会保留，论文可继续修订；arXiv 公开后再补链接。
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management**，Yuhua Chen，2026。**[阅读预印本 PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24-r2/paper/2026-10-24-r2/JustFit-v2.pdf)** · [论文与引用文件](paper/README.md)。此日期版本会保留，论文可继续修订；arXiv 公开后再补链接。
 
 **完整 AIME 2026：** M5 Pro 在相同 4-bit 权重与 TQ4 KV 下，A8 关闭答对 **86/90（95.6%）**，开启答对 **85/90（94.4%）**，覆盖全部 30 题、三个 seed。每臂各有 3 次输出达到上限，计入分母；该比较检验量化配置内的 A8 开关。
 
@@ -126,8 +126,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
   month = oct,
-  note = {Preprint, version 2026-10-24 full-set AIME update},
-  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf}
+  note = {Preprint, version 2026-10-24-r2, attribution clarification},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24-r2/paper/2026-10-24-r2/JustFit-v2.pdf}
 }
 ```
 
@@ -135,6 +135,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 致谢与许可证
 
-JustFit 原生运行时基于 **[Splash 1.3.0](https://github.com/incoai/splash)**。上游作者和实现贡献保留在 [NOTICE](NOTICE) 与[第三方声明](source/THIRD_PARTY_NOTICES)中。权重和衍生资产保留各自许可证。
+JustFit 原生运行时基于 **[Splash 1.3.0](https://github.com/incoai/splash)**。语言 ANE FFN、KV 分页分层和复合状态持久化框架来自上游；JustFit 扩展其集成、恢复点保留和资源协调。上游作者和实现贡献保留在 [NOTICE](NOTICE) 与[第三方声明](source/THIRD_PARTY_NOTICES)中。权重和衍生资产保留各自许可证。
 
 代码采用 [Apache 2.0](LICENSE)。JustFit 的问题由本项目维护者处理，请向本仓库提交反馈。
