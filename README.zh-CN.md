@@ -113,7 +113,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 论文与引用
 
-**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management**，Yuhua Chen，2026。论文正在修订，作者审阅后补充公开 PDF 和 arXiv 链接；软件测试版不冻结论文。
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management**，Yuhua Chen，2026。**[阅读预印本 PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf)** · [论文与引用文件](paper/README.md)。此日期版本会保留，论文可继续修订；arXiv 公开后再补链接。
 
 如果 JustFit 对你的研究有帮助，请引用：
 
@@ -122,7 +122,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   author = {Chen, Yuhua},
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
-  note = {Manuscript in preparation}
+  month = oct,
+  note = {Preprint, version 2026-10-23},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf}
 }
 ```
 
