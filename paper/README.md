@@ -4,8 +4,8 @@
 
 Yuhua Chen · Preprint · October 23, 2026 · 28 pages
 
-- [Read the fixed-version PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf)
-- [Download clean LaTeX source](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-source/paper/2026-10-23/JustFit-v2-2026-10-23-arxiv-source.zip)
+- [Read the fixed-version PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf)
+- [Download clean LaTeX source](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2-2026-10-23-arxiv-source.zip)
 - [BibTeX](2026-10-23/citation.bib) · [CITATION.cff](../CITATION.cff)
 - Contact: [contact@yuhuachen.com](mailto:contact@yuhuachen.com)
 
@@ -23,7 +23,7 @@ If this work supports your research, please cite:
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
   month = oct,
-  note = {Preprint, version 2026-10-23},
-  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf}
+  note = {Preprint, version 2026-10-23 revision 2},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf}
 }
 ```

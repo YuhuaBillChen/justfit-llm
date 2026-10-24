@@ -114,7 +114,7 @@ The default endpoint is local. Network deployment needs appropriate authenticati
 
 ## Paper and citation
 
-**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This dated version remains available as the manuscript evolves; an arXiv link will be added when public.
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This dated version remains available as the manuscript evolves; an arXiv link will be added when public.
 
 If JustFit supports your research, please cite:
 
@@ -124,8 +124,8 @@ If JustFit supports your research, please cite:
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
   month = oct,
-  note = {Preprint, version 2026-10-23},
-  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf}
+  note = {Preprint, version 2026-10-23 revision 2},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf}
 }
 ```
 
