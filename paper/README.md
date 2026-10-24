@@ -4,12 +4,12 @@
 
 Yuhua Chen · Preprint · October 24, 2026 · 29 pages
 
-- [Read the fixed-version PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf)
-- [Download clean LaTeX source](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2-2026-10-24-arxiv-source.zip)
-- [BibTeX](2026-10-24/citation.bib) · [CITATION.cff](../CITATION.cff)
+- [Read the fixed-version PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24-r2/paper/2026-10-24-r2/JustFit-v2.pdf)
+- [Download clean LaTeX source](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24-r2/paper/2026-10-24-r2/JustFit-v2-2026-10-24-r2-arxiv-source.zip)
+- [BibTeX](2026-10-24-r2/citation.bib) · [CITATION.cff](../CITATION.cff)
 - Contact: [contact@yuhuachen.com](mailto:contact@yuhuachen.com)
 
-This update highlights the full-set AIME 2026 comparison: 95.6% / 94.4% over 30 questions at three seeds, with matched four-bit weights and TQ4 KV. It retains the figures and experimental data.
+This revision clarifies inherited upstream ANE FFN, paged KV storage and composite persistence, separating them from JustFit extensions. It retains the full-set AIME 2026 comparison: 95.6% / 94.4% over 30 questions at three seeds, with matched four-bit weights and TQ4 KV. It retains the figures and experimental data.
 
 This is a public preprint. The manuscript remains under revision; this dated copy will be retained when a newer version is posted. An arXiv link will be added after it becomes public.
 
@@ -25,7 +25,7 @@ If this work supports your research, please cite:
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
   month = oct,
-  note = {Preprint, version 2026-10-24 full-set AIME update},
-  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf}
+  note = {Preprint, version 2026-10-24-r2, attribution clarification},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24-r2/paper/2026-10-24-r2/JustFit-v2.pdf}
 }
 ```

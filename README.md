@@ -13,7 +13,7 @@
 
 JustFit is a local inference system for serving a **27B language-and-vision model on memory-constrained Macs**. It coordinates compressed context, a resident speculative draft, concurrent requests and CPU/GPU/ANE work under one unified-memory budget.
 
-**[2.3.0 is available on GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)** with source, Python packages, an Apple-notarized native runtime and six ANE bundles. [TestPyPI 2.3.0](https://test.pypi.org/project/justfit-llm/2.3.0/) has passed a real Mac installation round trip; production PyPI publication awaits Trusted Publisher configuration.
+**[2.3.0 is available on GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)** with source, Python packages, an Apple-notarized native runtime and six ANE bundles. Install from [PyPI](https://pypi.org/project/justfit-llm/2.3.0/) using the instructions below.
 
 ## Why JustFit
 
@@ -45,13 +45,13 @@ Installing the Python package on Linux does not enable native inference there. T
 
 ### Install the reviewed release
 
-Download the wheel from the [2.3.0 Release](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0), then create a fresh environment in its download directory:
+Create a fresh environment and install the pinned release from PyPI:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install ./justfit_llm-2.3.0-py3-none-any.whl
+python -m pip install justfit-llm==2.3.0
 justfit verify
 justfit doctor
 justfit serve \
@@ -115,7 +115,7 @@ The default endpoint is local. Network deployment needs appropriate authenticati
 
 ## Paper and citation
 
-**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This dated version remains available as the manuscript evolves; an arXiv link will be added when public.
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24-r2/paper/2026-10-24-r2/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This dated version remains available as the manuscript evolves; an arXiv link will be added when public.
 
 **Full-set AIME 2026:** on M5 Pro, the same four-bit target with TQ4 KV scores **86/90 (95.6%) with A8 off** and **85/90 (94.4%) with A8 on**, covering all 30 questions at three seeds. Each arm has three capped generations included in the denominator. This tests A8 within the quantized configuration.
 
@@ -127,8 +127,8 @@ If JustFit supports your research, please cite:
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
   month = oct,
-  note = {Preprint, version 2026-10-24 full-set AIME update},
-  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf}
+  note = {Preprint, version 2026-10-24-r2, attribution clarification},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24-r2/paper/2026-10-24-r2/JustFit-v2.pdf}
 }
 ```
 
@@ -136,6 +136,6 @@ If JustFit supports your research, please cite:
 
 ## Acknowledgments and license
 
-JustFit's native runtime is derived from **[Splash 1.3.0](https://github.com/incoai/splash)**. Upstream authors, licenses and implementation credits are preserved in [NOTICE](NOTICE) and [third-party notices](source/THIRD_PARTY_NOTICES). Model weights and derived assets retain their own licenses.
+JustFit's native runtime is derived from **[Splash 1.3.0](https://github.com/incoai/splash)**. Splash already provides language ANE FFN, paged KV tiering and composite-state persistence; JustFit extends their integration, retention and resource coordination. Upstream authors, licenses and implementation credits are preserved in [NOTICE](NOTICE) and [third-party notices](source/THIRD_PARTY_NOTICES). Model weights and derived assets retain their own licenses.
 
 Code is available under [Apache 2.0](LICENSE). JustFit maintainers handle this project's support; please direct JustFit issues here rather than to upstream maintainers.
