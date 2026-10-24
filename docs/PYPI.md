@@ -1,7 +1,7 @@
 # Python distribution and acceptance
 
 This candidate provides a source-bearing Python wheel and sdist, version
-`2.3.0rc24`. It installs the frontend dependencies and the `justfit` / `justfit-llm` commands.
+`2.3.0`. It installs the frontend dependencies and the `justfit` / `justfit-llm` commands.
 It does not ship a precompiled native executable, Metal libraries, model weights
 or machine-specific ANE caches. Installation does not compile code, download
 models, register services or modify existing services.
@@ -9,17 +9,16 @@ models, register services or modify existing services.
 ## Install the preview or a downloaded wheel
 
 Use Python 3.12–3.14 in a new virtual environment without
-`--system-site-packages`. Do not reuse a model-export or research environment. The public preview is `2.3.0rc24` on TestPyPI. Formal PyPI `2.3.0` is not published;
-do not use an unqualified `pip install justfit-llm` as the current installation path.
-Follow the index-separated commands in the [README](../README.md#get-started),
-using the immutable `v2.3.0rc24` tag for the matching dependency file.
+`--system-site-packages`. Do not reuse a model-export or research environment. The stable 2.3.0 publication is pending. Install the reviewed local wheel until
+the final package-index download is verified. Follow the commands in the
+[README](../README.md#get-started) and use this source tree for matching dependencies.
 The local-wheel commands below are an alternative for an already downloaded artifact.
 
 ## One command
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.0rc24-py3-none-any.whl
+.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.0-py3-none-any.whl
 .venv/bin/justfit serve
 ```
 
@@ -48,7 +47,7 @@ URL is configured yet; the no-argument path still builds locally.
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.0rc24-py3-none-any.whl
+.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.0-py3-none-any.whl
 .venv/bin/python -m pip check
 .venv/bin/justfit-llm --version
 .venv/bin/justfit-llm verify
@@ -98,4 +97,3 @@ and compare the artifact hash before installing it with dependencies resolved
 from the normal trusted index. This avoids mixing dependency indexes.
 Formal PyPI upload and GitHub/HF publication are separate explicit actions.
 The paper remains under author revision; GitHub is the current project homepage.
-

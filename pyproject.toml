@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "justfit-llm"
-version = "2.3.0rc24"
+version = "2.3.0"
 description = "Apple silicon inference with coordinated CPU, GPU and ANE work"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "source/THIRD_PARTY_NOTICES"]
 dynamic = ["dependencies"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Operating System :: MacOS :: MacOS X",
   "Programming Language :: Python :: 3",
 ]

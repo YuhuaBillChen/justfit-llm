@@ -42,7 +42,7 @@ def main():
         run([python, '-m', 'pip', 'install', artifact])
         run([python, '-m', 'pip', 'check'])
         version = run([cli, '--version']).strip()
-        assert version == '2.3.0rc24', version
+        assert version == '2.3.0', version
         assert json.loads(run([cli, 'verify']))['passed']
         workspace = output / (name + ' workspace')
         run([cli, 'init', workspace])
@@ -68,13 +68,13 @@ def main():
             digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
             (index / 'index.html').write_text(f'<a href="{wheel.as_uri()}#sha256={digest}">{wheel.name}</a>')
             run([python, '-m', 'pip', 'install', '--no-deps', '--no-cache-dir',
-                 '--index-url', (output / 'simple').as_uri(), 'justfit-llm==2.3.0rc24'])
+                 '--index-url', (output / 'simple').as_uri(), 'justfit-llm==2.3.0'])
         else:
             run([python, '-m', 'pip', 'install', '--no-deps', artifact])
         assert marker.read_text() == 'must survive package lifecycle'
         run([cli, 'verify'])
         run([python, '-m', 'pip', 'check'])
-    receipt = dict(passed=True, version='2.3.0rc24',
+    receipt = dict(passed=True, version='2.3.0',
                    artifacts={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (wheel, sdist)},
                    checks=len(results), scope='fresh wheel/sdist install, dependency resolution, integrity, frontend import/help, preset plans, uninstall/reinstall and local simple-index resolution',
                    mac_native_build_and_inference=False, testpypi_uploaded=False,

@@ -4,7 +4,7 @@
     <img src="docs/assets/justfit-banner.svg" alt="JustFit — 面向 Apple silicon 的长上下文本地 LLM 推理" width="100%">
   </picture>
 
-  [![测试版](https://img.shields.io/badge/TestPyPI-2.3.0rc24-087f78)](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)
+  [![版本](https://img.shields.io/badge/version-2.3.0-087f78)](CHANGELOG.md)
   [![许可证：Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
 
   **[开始使用](#开始使用) · [实测结果](#实测结果) · [文档导航](#文档导航) · [English](README.md)**
@@ -12,7 +12,7 @@
 
 JustFit 面向内存受限的 Mac，协调压缩上下文、常驻推测 draft、并发请求及 CPU/GPU/ANE，运行 **27B 语言与视觉模型**。所有计算共享同一份统一内存预算。
 
-**公开测试版：`2.3.0rc24`。** [源码](https://github.com/YuhuaBillChen/justfit-llm/tree/v2.3.0rc24)和 [TestPyPI 包](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)已发布。本测试版在本机编译原生程序；签名的预编译程序和按芯片区分的 ANE 下载正在准备。正式 PyPI `2.3.0` 尚未发布，论文仍在修订。
+**正式版本号：`2.3.0`。** 此源码树用于正式发布准备，索引和下载资产尚待上传。请使用随候选交付的已审 wheel 与原生运行时；原 [RC24 测试版](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)单独保留。
 
 ## JustFit 做什么
 
@@ -44,16 +44,14 @@ Linux 可以安装 Python 工具，但不能运行这里的原生推理。独立
 
 ### 安装已测试版本
 
-固定到测试版标签，建立独立环境。第三方依赖从正式 PyPI 安装，JustFit 单独从 TestPyPI 获取，避免混用依赖索引：
+建立独立环境，安装与此源码一起下载的已审 wheel：
 
 ```bash
-git clone --branch v2.3.0rc24 --depth 1 https://github.com/YuhuaBillChen/justfit-llm.git
-cd justfit-llm
 python3.12 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --index-url https://pypi.org/simple/ -r requirements-runtime.txt
-python -m pip install --no-deps --index-url https://test.pypi.org/simple/ justfit-llm==2.3.0rc24
+python -m pip install ./justfit_llm-2.3.0-py3-none-any.whl
 justfit verify
 justfit doctor
 justfit serve
@@ -61,7 +59,7 @@ justfit serve
 
 首次运行会创建带版本的工作区、编译原生程序、下载并校验模型、选择设备预设，然后在 **`http://127.0.0.1:8000`** 提供服务。后续复用编译结果和模型；Ctrl+C 停止前台服务。没有视觉 ANE profile 时仍可使用 GPU 处理图像。
 
-若缺少 Metal 编译器，在安装兼容 Xcode 后执行 `xcodebuild -downloadComponent MetalToolchain`。[Quickstart](QUICKSTART.md)介绍工具路径、端口、本地模型和预编译包参数。公开测试版以标签为准，`main` 的文档会继续更新。
+若缺少 Metal 编译器，在安装兼容 Xcode 后执行 `xcodebuild -downloadComponent MetalToolchain`。[Quickstart](QUICKSTART.md)介绍工具路径、端口、本地模型和预编译包参数。使用配套的 2.3.0 运行时和公开 SHA256 可跳过本机编译，具体见链接说明。
 
 ### 发一个请求
 
