@@ -5,7 +5,7 @@
 Yuhua Chen · Preprint · October 23, 2026 · 28 pages
 
 - [Read the fixed-version PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf)
-- [Download clean LaTeX source](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2-2026-10-23-arxiv-source.zip)
+- [Download clean LaTeX source](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-source/paper/2026-10-23/JustFit-v2-2026-10-23-arxiv-source.zip)
 - [BibTeX](2026-10-23/citation.bib) · [CITATION.cff](../CITATION.cff)
 - Contact: [contact@yuhuachen.com](mailto:contact@yuhuachen.com)
 
