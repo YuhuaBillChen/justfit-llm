@@ -4,7 +4,7 @@
     <img src="docs/assets/justfit-banner.svg" alt="JustFit — long-context LLM serving on Apple silicon" width="100%">
   </picture>
 
-  [![Preview](https://img.shields.io/badge/TestPyPI-2.3.0rc24-087f78)](https://test.pypi.org/project/justfit-llm/2.3.0rc24/)
+  [![Version](https://img.shields.io/badge/version-2.3.0-087f78)](CHANGELOG.md)
   [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
   [![Apple silicon](https://img.shields.io/badge/platform-Apple%20silicon-526b81)](#supported-setup)
 
@@ -13,7 +13,7 @@
 
 JustFit is a local inference system for serving a **27B language-and-vision model on memory-constrained Macs**. It coordinates compressed context, a resident speculative draft, concurrent requests and CPU/GPU/ANE work under one unified-memory budget.
 
-**Public preview: `2.3.0rc24`.** [Source](https://github.com/YuhuaBillChen/justfit-llm/tree/v2.3.0rc24) and [TestPyPI packages](https://test.pypi.org/project/justfit-llm/2.3.0rc24/) are available. This preview builds the native runtime locally. Signed prebuilt runtime and chip-specific ANE downloads are being prepared; formal PyPI `2.3.0` is not published yet. The paper is under revision.
+**Stable version: `2.3.0`.** This source tree prepares the stable release. Package-index and release-asset publication are pending; use the reviewed wheel and native runtime supplied with this release candidate. The immutable [RC24 preview](https://test.pypi.org/project/justfit-llm/2.3.0rc24/) remains available separately.
 
 ## Why JustFit
 
@@ -43,18 +43,16 @@ At 16K, v2's median decode rate is **2.0–2.5× the v1 rate** across these conf
 
 Installing the Python package on Linux does not enable native inference there. The standalone GPU engine's macOS 26.4 source target is separate from this complete macOS 27/CoreAI setup.
 
-### Install the tested preview
+### Install the reviewed release
 
-Use the immutable preview tag and a fresh environment. Install third-party dependencies from PyPI, then install JustFit from TestPyPI without mixing dependency indexes:
+Create a fresh environment. Install the reviewed wheel downloaded alongside this source tree:
 
 ```bash
-git clone --branch v2.3.0rc24 --depth 1 https://github.com/YuhuaBillChen/justfit-llm.git
-cd justfit-llm
 python3.12 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --index-url https://pypi.org/simple/ -r requirements-runtime.txt
-python -m pip install --no-deps --index-url https://test.pypi.org/simple/ justfit-llm==2.3.0rc24
+python -m pip install ./justfit_llm-2.3.0-py3-none-any.whl
 justfit verify
 justfit doctor
 justfit serve
@@ -62,7 +60,7 @@ justfit serve
 
 First run: create a versioned workspace, build the native runtime, download and verify the pinned model, choose the device preset, then serve on **`http://127.0.0.1:8000`**. Later runs reuse the build and model. Ctrl+C stops the foreground server. GPU vision works without a compiled ANE vision profile.
 
-If the Metal compiler is missing, install the component with `xcodebuild -downloadComponent MetalToolchain` after installing compatible Xcode. [Step-by-step setup and overrides](QUICKSTART.md) cover custom ports, local models and prebuilt-runtime inputs. The tested public preview remains pinned to its tag; `main` may contain newer documentation.
+If the Metal compiler is missing, install the component with `xcodebuild -downloadComponent MetalToolchain` after installing compatible Xcode. [Step-by-step setup and overrides](QUICKSTART.md) cover custom ports, local models and prebuilt-runtime inputs. Use the matching 2.3.0 runtime and published SHA256 to skip local compilation; see the linked instructions.
 
 ### Send a request
 

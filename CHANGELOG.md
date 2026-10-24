@@ -1,6 +1,10 @@
 # Changelog
 
-## 2.3.0rc24 — unpublished candidate
+## 2.3.0
+
+- Promote the qualified preview to a stable-version release candidate.
+- Distribute the native engine and helpers with Developer ID signatures; verify
+  Apple notarization and exact installed artifacts before publication.
 
 - Support a separately pinned local or HTTPS-manifest native runtime, validating
   source identity, platform, archive paths and output hashes before installation.
@@ -39,7 +43,7 @@
 - Synthetic image fixtures with frozen expected answers.
 
 See [validation](docs/VALIDATION.md) for test procedures and limitations.
-Paper and website are placeholders; public publication is pending.
+The dated JustFit v2 preprint is linked from the README and citation metadata.
 
 ### ANE installation integrity
 
