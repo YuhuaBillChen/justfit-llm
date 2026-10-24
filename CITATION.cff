@@ -12,4 +12,7 @@ preferred-citation:
     - family-names: Chen
       given-names: Yuhua
   year: 2026
-  notes: "Unpublished manuscript; public link and identifier pending."
+  month: 10
+  day: 23
+  url: "https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23/paper/2026-10-23/JustFit-v2.pdf"
+  notes: "Preprint, version 2026-10-23."
