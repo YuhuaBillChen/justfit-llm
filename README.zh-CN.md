@@ -111,7 +111,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 论文与引用
 
-**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management**，Yuhua Chen，2026。**[阅读预印本 PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf)** · [论文与引用文件](paper/README.md)。此日期版本会保留，论文可继续修订；arXiv 公开后再补链接。
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management**，Yuhua Chen，2026。**[阅读预印本 PDF](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf)** · [论文与引用文件](paper/README.md)。此日期版本会保留，论文可继续修订；arXiv 公开后再补链接。
+
+**完整 AIME 2026：** M5 Pro 在相同 4-bit 权重与 TQ4 KV 下，A8 关闭答对 **86/90（95.6%）**，开启答对 **85/90（94.4%）**，覆盖全部 30 题、三个 seed。每臂各有 3 次输出达到上限，计入分母；该比较检验量化配置内的 A8 开关。
 
 如果 JustFit 对你的研究有帮助，请引用：
 
@@ -121,8 +123,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
   month = oct,
-  note = {Preprint, version 2026-10-23 revision 2},
-  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf}
+  note = {Preprint, version 2026-10-24 full-set AIME update},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf}
 }
 ```
 
