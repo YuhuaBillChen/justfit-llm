@@ -112,7 +112,9 @@ The default endpoint is local. Network deployment needs appropriate authenticati
 
 ## Paper and citation
 
-**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This dated version remains available as the manuscript evolves; an arXiv link will be added when public.
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This dated version remains available as the manuscript evolves; an arXiv link will be added when public.
+
+**Full-set AIME 2026:** on M5 Pro, the same four-bit target with TQ4 KV scores **86/90 (95.6%) with A8 off** and **85/90 (94.4%) with A8 on**, covering all 30 questions at three seeds. Each arm has three capped generations included in the denominator. This tests A8 within the quantized configuration.
 
 If JustFit supports your research, please cite:
 
@@ -122,8 +124,8 @@ If JustFit supports your research, please cite:
   title = {{JustFit v2}: Long-Context Local LLM Serving with Just-in-Time State Management},
   year = {2026},
   month = oct,
-  note = {Preprint, version 2026-10-23 revision 2},
-  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-23-r2/paper/2026-10-23/JustFit-v2.pdf}
+  note = {Preprint, version 2026-10-24 full-set AIME update},
+  url = {https://github.com/YuhuaBillChen/justfit-llm/blob/paper-v2-2026-10-24/paper/2026-10-24/JustFit-v2.pdf}
 }
 ```
 
