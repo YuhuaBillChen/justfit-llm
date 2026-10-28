@@ -55,7 +55,7 @@ justfit verify
 justfit doctor
 justfit serve \
   --runtime-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.1/runtime-manifest.json \
-  --runtime-sha256 <发布页 SHA256SUMS 中 runtime-manifest.json 的 SHA256> \
+  --runtime-sha256 2522e5766a48a2048b73d217f1a2aa8107ff6147f7bfb7195f5d75eecbd6e529 \
   --ane-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/ane-index.json \
   --ane-manifest-sha256 fd1b71cfa9d4e785741dc2e0ba4d43f2a4dd556a62c0a61f37838b7f9e3ec99d
 ```
