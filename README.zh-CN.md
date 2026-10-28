@@ -4,7 +4,7 @@
     <img src="docs/assets/justfit-banner.svg" alt="JustFit — 面向 Apple silicon 的长上下文本地 LLM 推理" width="100%">
   </picture>
 
-  [![版本](https://img.shields.io/badge/version-2.3.0-087f78)](CHANGELOG.md)
+  [![版本](https://img.shields.io/badge/version-2.3.1-087f78)](CHANGELOG.md)
   [![许可证：Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
 
   **[开始使用](#开始使用) · [实测结果](#实测结果) · [文档导航](#文档导航) · [English](README.md)**
@@ -12,7 +12,7 @@
 
 JustFit 面向内存受限的 Mac，协调压缩上下文、常驻推测 draft、并发请求及 CPU/GPU/ANE，运行 **27B 语言与视觉模型**。所有计算共享同一份统一内存预算。
 
-**2.3.0 已发布到 [GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)**，包括源码、Python 包、Apple 公证的原生运行时和六份 ANE 包。[正式 PyPI 2.3.0](https://pypi.org/project/justfit-llm/2.3.0/) 也已上线，按下方命令安装。
+**2.3.1 已发布到 [GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.1)**，包括源码、Python 包和 Apple 公证的原生运行时；[2.3.0](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0) 的六份 ANE 包原样适用。[正式 PyPI 2.3.1](https://pypi.org/project/justfit-llm/2.3.1/) 也已上线，按下方命令安装。
 
 ## JustFit 做什么
 
@@ -50,12 +50,12 @@ Linux 可以安装 Python 工具，但不能运行这里的原生推理。独立
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install justfit-llm==2.3.0
+python -m pip install justfit-llm==2.3.1
 justfit verify
 justfit doctor
 justfit serve \
-  --runtime-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/runtime-manifest.json \
-  --runtime-sha256 f759236b3f78766bd41d47c75b399d6bca0f56ba9d6b39dd83c705f74206aa3c \
+  --runtime-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.1/runtime-manifest.json \
+  --runtime-sha256 <发布页 SHA256SUMS 中 runtime-manifest.json 的 SHA256> \
   --ane-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/ane-index.json \
   --ane-manifest-sha256 fd1b71cfa9d4e785741dc2e0ba4d43f2a4dd556a62c0a61f37838b7f9e3ec99d
 ```

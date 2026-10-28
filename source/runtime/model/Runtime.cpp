@@ -822,7 +822,75 @@ struct Runtime::Impl {
       vision = std::move(encoder);
     counters.imageEmbeddingReuses += shared.size();
     images = std::move(staged);
+    encodeAdmittedImages(request.id, images);
     return admission;
+  }
+
+  // Encodes the images a start just admitted before the engine admits the
+  // prompt's KV, then returns the encoder arena and the vision weights. At
+  // long context the vision tower, its scratch and the whole KV target do
+  // not fit in one budget together, yet the tower is only needed until the
+  // rows exist: holding it while KV grows made a 215K image request fail
+  // its KV target although every piece fits on its own. Only an idle
+  // start encodes here, and only while no other request holds a lane: the
+  // encode is synchronous, and between two decode commands of a resident
+  // request it would stall that request. Otherwise, or when the encode
+  // fails, the rows stay unencoded with their pixels and the first prefill
+  // chunk that reaches the image encodes them, as before.
+  void encodeAdmittedImages(uint64_t requestId, std::vector<ImageState> &staged) {
+    if (!vision || backend.commandInFlight() || !encodeImagesFirst() ||
+        std::any_of(requests.begin(), requests.end(), [&](const auto &entry) {
+          return entry.second.resident && entry.first != requestId;
+        }))
+      return;
+    std::vector<ImageRows *> encoded;
+    bool submitted = false;
+    try {
+      CommandGraph graph;
+      for (ImageState &image : staged) {
+        if (!image.rows)
+          continue;
+        ImageRows &rows = *image.rows;
+        if (rows.encoded || rows.encoding || !rows.pixels || !rows.embeddings)
+          continue;
+        vision->encode(graph, image.span.grid(), rows.pixels, rows.embeddings);
+        encoded.push_back(&rows);
+      }
+      if (encoded.empty())
+        return;
+      // Test hook: 1 fails before submission (falls back), 2 after the
+      // command completes (handled like any failed command).
+      const char *fail = std::getenv("JUSTFIT_TEST_FAIL_ENCODE_FIRST");
+      if (fail && std::strcmp(fail, "1") == 0)
+        throw std::runtime_error("injected encode-first failure before submission");
+      submitted = true;
+      static_cast<void>(backend.submitCommandAsync(graph.command()).wait());
+      if (fail && std::strcmp(fail, "2") == 0)
+        throw metal::MetalBackendError("injected encode-first failure after submission");
+    } catch (const std::exception &error) {
+      // Only a failure before submission leaves the backend as it was; the
+      // rows then keep their pixels and the prefill encodes them. A submitted
+      // command that fails, times out or is interrupted is the backend's
+      // failure and propagates like any other command's.
+      if (submitted || !backend.healthy())
+        throw;
+      std::fprintf(stderr, "JUSTFIT_VISION_ENCODE_FIRST failed=%s; encoding in prefill\n",
+                   error.what());
+      return;
+    }
+    counters.imageEncodes += encoded.size();
+    for (ImageRows *rows : encoded) {
+      rows->encoded = true;
+      rows->pixels = MetalBuffer{};
+    }
+    const uint64_t released = releaseIdleVisionWeights();
+    std::fprintf(stderr, "JUSTFIT_VISION_ENCODE_FIRST images=%zu released_bytes=%llu\n",
+                 encoded.size(), (unsigned long long)released);
+  }
+
+  static bool encodeImagesFirst() noexcept {
+    const char *value = std::getenv("JUSTFIT_VISION_ENCODE_FIRST");
+    return !value || std::strcmp(value, "0") != 0;
   }
 
   // No image waits for its encode, so the vision arena can go.
