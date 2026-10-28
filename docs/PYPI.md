@@ -1,7 +1,7 @@
 # Python distribution and acceptance
 
 This candidate provides a source-bearing Python wheel and sdist, version
-`2.3.0`. It installs the frontend dependencies and the `justfit` / `justfit-llm` commands.
+`2.3.1`. It installs the frontend dependencies and the `justfit` / `justfit-llm` commands.
 It does not ship a precompiled native executable, Metal libraries, model weights
 or machine-specific ANE caches. Installation does not compile code, download
 models, register services or modify existing services.
@@ -9,8 +9,7 @@ models, register services or modify existing services.
 ## Install the preview or a downloaded wheel
 
 Use Python 3.12–3.14 in a new virtual environment without
-`--system-site-packages`. Do not reuse a model-export or research environment. The stable 2.3.0 publication is pending. Install the reviewed local wheel until
-the final package-index download is verified. Follow the commands in the
+`--system-site-packages`. Do not reuse a model-export or research environment. Install the stable release with `python -m pip install justfit-llm==2.3.1`. Follow the commands in the
 [README](../README.md#get-started) and use this source tree for matching dependencies.
 The local-wheel commands below are an alternative for an already downloaded artifact.
 
@@ -18,7 +17,7 @@ The local-wheel commands below are an alternative for an already downloaded arti
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.0-py3-none-any.whl
+.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.1-py3-none-any.whl
 .venv/bin/justfit serve
 ```
 
@@ -47,7 +46,7 @@ URL is configured yet; the no-argument path still builds locally.
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.0-py3-none-any.whl
+.venv/bin/python -m pip install /absolute/path/justfit_llm-2.3.1-py3-none-any.whl
 .venv/bin/python -m pip check
 .venv/bin/justfit-llm --version
 .venv/bin/justfit-llm verify

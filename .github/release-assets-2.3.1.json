@@ -1,0 +1,11 @@
+{
+  "source_url": "https://folders-payment-differ-encourages.trycloudflare.com",
+  "files": {
+    "JustFit-2.3.1-project.zip": "58a0b7b03de54d322e9851f490bac09e772bb330a30e203e32c1c395e2ff13e1",
+    "JustFit-runtime-2.3.1-macos27-arm64.zip": "b27c0c9a322c616084b413f5217e904430caa9d863b0b76b5097db69412871d6",
+    "justfit_llm-2.3.1-py3-none-any.whl": "81cbb2c4c0a155a8c3b00a1e7583ab8940415c4d4c1ff5e8e7d352e1b57b94cd",
+    "justfit_llm-2.3.1.tar.gz": "46fc8e08460fb3c2046dfcfaa8bd54d60d1c745e1b12a345215e492abf59a36a",
+    "runtime-manifest.json": "2522e5766a48a2048b73d217f1a2aa8107ff6147f7bfb7195f5d75eecbd6e529",
+    "SHA256SUMS": "1279ffc73544a02b4cedfe4321ead62c4935eabc41cc930b7c220ef027a8c391"
+  }
+}

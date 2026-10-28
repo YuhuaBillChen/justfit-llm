@@ -4,7 +4,7 @@
     <img src="docs/assets/justfit-banner.svg" alt="JustFit — long-context LLM serving on Apple silicon" width="100%">
   </picture>
 
-  [![Version](https://img.shields.io/badge/version-2.3.0-087f78)](CHANGELOG.md)
+  [![Version](https://img.shields.io/badge/version-2.3.1-087f78)](CHANGELOG.md)
   [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
   [![Apple silicon](https://img.shields.io/badge/platform-Apple%20silicon-526b81)](#supported-setup)
 
@@ -13,7 +13,7 @@
 
 JustFit is a local inference system for serving a **27B language-and-vision model on memory-constrained Macs**. It coordinates compressed context, a resident speculative draft, concurrent requests and CPU/GPU/ANE work under one unified-memory budget.
 
-**[2.3.0 is available on GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0)** with source, Python packages, an Apple-notarized native runtime and six ANE bundles. Install from [PyPI](https://pypi.org/project/justfit-llm/2.3.0/) using the instructions below.
+**[2.3.1 is available on GitHub Releases](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.1)** with source, Python packages and an Apple-notarized native runtime; the six ANE bundles of [2.3.0](https://github.com/YuhuaBillChen/justfit-llm/releases/tag/v2.3.0) apply unchanged. Install from [PyPI](https://pypi.org/project/justfit-llm/2.3.1/) using the instructions below.
 
 ## Why JustFit
 
@@ -51,12 +51,12 @@ Create a fresh environment and install the pinned release from PyPI:
 python3.12 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install justfit-llm==2.3.0
+python -m pip install justfit-llm==2.3.1
 justfit verify
 justfit doctor
 justfit serve \
-  --runtime-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/runtime-manifest.json \
-  --runtime-sha256 f759236b3f78766bd41d47c75b399d6bca0f56ba9d6b39dd83c705f74206aa3c \
+  --runtime-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.1/runtime-manifest.json \
+  --runtime-sha256 <runtime-manifest.json SHA256 from the release SHA256SUMS> \
   --ane-manifest https://github.com/YuhuaBillChen/justfit-llm/releases/download/v2.3.0/ane-index.json \
   --ane-manifest-sha256 fd1b71cfa9d4e785741dc2e0ba4d43f2a4dd556a62c0a61f37838b7f9e3ec99d
 ```

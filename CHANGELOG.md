@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.1
+
+- Fix long-context image requests that could not be admitted: an image's vision
+  tower, encoder scratch and pixel buffers were held while the engine admitted the
+  prompt's whole KV target, so a large image at about 215K context failed with
+  `capacity_exhausted` (or waited on host memory) although each part fits on its
+  own. When no other request holds a lane, images are now encoded right after
+  their admission and the vision resources are released before KV admission; a
+  failed early encode falls back to encoding in the prefill chunk as before.
+  `JUSTFIT_VISION_ENCODE_FIRST=0` restores the previous order.
+
 ## 2.3.0
 
 - Promote the qualified preview to a stable-version release candidate.

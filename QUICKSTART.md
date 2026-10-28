@@ -3,16 +3,16 @@
 Run all commands from this directory. These commands build and run JustFit from
 this archive; no global installation or service registration is performed.
 
-## Install version 2.3.0
+## Install version 2.3.1
 
-Use the reviewed 2.3.0 wheel alongside this source archive. Public index and
-release-asset uploads are pending; a local file installation does not require them:
+Install 2.3.1 from PyPI with `python -m pip install justfit-llm==2.3.1`, or use
+the reviewed 2.3.1 wheel alongside this source archive:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --index-url https://pypi.org/simple/ -r requirements-runtime.txt
-python -m pip install /absolute/path/justfit_llm-2.3.0-py3-none-any.whl
+python -m pip install /absolute/path/justfit_llm-2.3.1-py3-none-any.whl
 justfit verify
 justfit doctor
 justfit serve

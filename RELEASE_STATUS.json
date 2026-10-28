@@ -1,5 +1,5 @@
 {
-  "version": "2.3.0",
+  "version": "2.3.1",
   "publicly_released": false,
   "index_uploaded": false,
   "paper": "dated public preprint; further author revisions independent of software",
@@ -18,6 +18,6 @@
   ],
   "publication_channel": "stable release preparation; index and asset publication pending",
   "qualified_source_ref": "v2.3.0rc24",
-  "intended_release_ref": "v2.3.0",
+  "intended_release_ref": "v2.3.1",
   "qualification_status": "RC24 evidence is historical; exact stable artifact qualification is tracked separately. Native runtime requires this package manifest."
 }

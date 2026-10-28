@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "justfit-llm"
-version = "2.3.0"
+version = "2.3.1"
 description = "Apple silicon inference with coordinated CPU, GPU and ANE work"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"

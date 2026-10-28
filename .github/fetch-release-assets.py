@@ -4,7 +4,7 @@ import hashlib
 import json
 import subprocess
 
-config = json.loads(Path('.github/release-assets-2.3.0.json').read_text())
+config = json.loads(Path('.github/release-assets-2.3.1.json').read_text())
 output = Path('reviewed-assets')
 output.mkdir(exist_ok=False)
 
