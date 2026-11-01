@@ -115,7 +115,7 @@ The default endpoint is local. Network deployment needs appropriate authenticati
 
 ## Paper and citation
 
-**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/main/paper/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This link always points to the current manuscript; an arXiv link will be added when public.
+**JustFit v2: Long-Context Local LLM Serving with Just-in-Time State Management** — Yuhua Chen, 2026. **[Read the preprint (PDF)](https://github.com/YuhuaBillChen/justfit-llm/blob/main/paper/JustFit-v2.pdf)** · [Paper and citation files](paper/README.md). This link always points to the current manuscript. arXiv: submitted; the link will be added here when it is public.
 
 **Full-set AIME 2026:** on M5 Pro, the same four-bit target with TQ4 KV scores **86/90 (95.6%) with A8 off** and **85/90 (94.4%) with A8 on**, covering all 30 questions at three seeds. Each arm has three capped generations included in the denominator. This tests A8 within the quantized configuration.
 

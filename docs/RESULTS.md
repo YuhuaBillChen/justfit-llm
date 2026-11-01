@@ -31,9 +31,9 @@ K means 1,024 positions. A tested bound establishes successful execution at that
 
 | System | B1 tested positions | B2 aggregate page capacity | Meaning |
 | --- | ---: | ---: | --- |
-| mlx-vlm (historical) | 32K | — | Preserved baseline's tested bound; not a theoretical maximum. |
+| mlx-vlm (historical) | 30K | — | TQ4 KV and MTP. M4 Pro service workload: 14,336 input tokens with a 1080p image plus 16,384 output tokens, APC on. A separate text-only run with APC off completes 65,472 + 64. Not a searched maximum. |
 | JustFit v1 | 256K | 320K | Ordered warm prefixes; concurrent autoregressive decoding. |
-| Splash 1.3.0 | 73,721 (about 72K) | — | Recorded bound under that configuration; not a universal hardware limit. |
+| Splash 1.3.0 | 73,721 (about 72K) | — | M4 Pro memory-planner maximum (INT8 KV, 21,400 MiB limit, 1 GiB headroom); not a completed 72K request. |
 | JustFit v2 | 256K | 320K | Warm prefixes; resident speculative draft during concurrent decoding. |
 
 V1 B2 uses `(160K + 16K) + (128K + 16K)` with a 21,000 MiB process-group guard; its final simultaneous logical sample is 327,677 positions, while page high-water reaches 327,680. V2 B2 uses `(128K + 32K) × 2`, a 22,015 MiB native budget and demand-allocated persistence staging. Initialization, guards and output shapes differ. Neither is a cold 320K or single-request 320K claim. Historical B1 and stock/mlx tests retain their own protocols.
