@@ -282,12 +282,40 @@ void QwenStateStorage::releaseLane(uint32_t index, uint64_t requestId) {
   current.metadata = {};
 }
 
+std::shared_ptr<const QwenCompositeState> QwenStateStorage::park(uint32_t index,
+                                                                 uint64_t requestId) {
+  Lane &current = lane(index);
+  requireAssigned(current);
+  if (!requestId || current.metadata.requestId != requestId) {
+    throw std::logic_error("Qwen lane owner mismatch");
+  }
+  validateLengths(current.metadata.lengths, false);
+  const uint32_t parity = current.metadata.activeParity;
+  pool_->cells.push_back(std::move(current.cells.gdn[parity ^ 1]));
+  QwenCachedBuffers buffers{std::move(current.cells.gdn[parity]),
+                            std::move(current.cells.draft)};
+  std::shared_ptr<QwenCompositeState> state(new QwenCompositeState(
+      pool_, std::move(buffers), layout_, current.metadata.lengths, nullptr));
+  state->exact_ = true;
+  current.metadata = {};
+  return state;
+}
+
 void QwenStateStorage::clearForColdStart(uint32_t index) {
   const Lane &target = lane(index);
   requireAssigned(target);
   if (target.metadata.lengths != QwenLogicalLengths{})
     throw std::logic_error("a cold start begins at logical length zero");
   clear(current(index).stateBase, "cold-start GDN state");
+}
+
+void QwenStateStorage::clearDraftRings(uint32_t index) {
+  const Lane &target = lane(index);
+  requireAssigned(target);
+  for (const DFlashDraftRingLayer &layer : target.cells.draft->layers()) {
+    clear(layer.keys, "draft ring keys");
+    clear(layer.values, "draft ring values");
+  }
 }
 
 uint64_t QwenStateStorage::releaseOneIdle(bool keepLane) noexcept {
@@ -470,7 +498,7 @@ std::unique_ptr<StateRestore> QwenStateStorage::beginRestore(
   const auto *typed = dynamic_cast<const QwenCompositeState *>(&state);
   if (!typed || typed->layout_ != layout_)
     throw std::invalid_argument("incompatible Qwen composite state");
-  validateLengths(typed->lengths_, true);
+  validateLengths(typed->lengths_, !typed->exact_);
   requireAssigned(lane(index));
   if (!typed->disk_) {
     restore(index, *typed, restoreDraftState);

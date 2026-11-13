@@ -53,6 +53,7 @@ public:
   [[nodiscard]] bool canOverlapExternalVision() override;
   void endExternalVision() noexcept override;
   void end(uint64_t requestId) override;
+  [[nodiscard]] Parked park(uint64_t requestId) override;
 
   [[nodiscard]] WarmupStepResult warmupPrefill(uint32_t rows) override;
   [[nodiscard]] WarmupStepResult

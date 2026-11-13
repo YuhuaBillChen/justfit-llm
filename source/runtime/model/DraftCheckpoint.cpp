@@ -61,7 +61,7 @@ Image layerImage(const DFlashDraftLayout &layout, uint32_t layer) {
   return result;
 }
 
-Image modelImage(const DFlashDraftLayout &layout) {
+Image modelImage(const DFlashDraftLayout &layout, bool hasMaskEmbedding) {
   Image result = affine::image("model.bin", kDFlashLayerMagic, layout.layers, 1);
   const std::string selector = "candidate_selector.";
   quantized(result, {{"fc", layout.hiddenSize}}, layout.hiddenSize, layout.targetHiddenSize);
@@ -70,22 +70,23 @@ Image modelImage(const DFlashDraftLayout &layout) {
   quantized(result, {{selector + "hidden_projection", layout.selectorRank}}, layout.selectorRank, layout.hiddenSize);
   copy(result, selector + "predecessor_codebook", {layout.vocabularySize, layout.selectorRank});
   copy(result, selector + "successor_codebook", {layout.vocabularySize, layout.selectorRank});
+  if (hasMaskEmbedding) copy(result, std::string(kDraftMaskEmbedding), {layout.hiddenSize});
   return result;
 }
 
 } // namespace
 
-std::vector<Image> draftCheckpointImages(const DFlashDraftLayout &layout) {
+std::vector<Image> draftCheckpointImages(const DFlashDraftLayout &layout, bool hasMaskEmbedding) {
   std::vector<Image> result;
   for (uint32_t layer = 0; layer < layout.layers; ++layer) result.push_back(layerImage(layout, layer));
-  result.push_back(modelImage(layout));
+  result.push_back(modelImage(layout, hasMaskEmbedding));
   return result;
 }
 
 DraftCheckpointLoader::DraftCheckpointLoader(WeightImages &images, const std::filesystem::path &directory,
                                              const DFlashDraftLayout &layout)
     : images_(images), planned_(std::make_shared<affine::PlannedCheckpoint>(directory)) {
-  planned_->images = draftCheckpointImages(layout);
+  planned_->images = draftCheckpointImages(layout, hasMaskEmbedding());
   for (Image &image : planned_->images) affine::bind(image, planned_->source);
 }
 DraftCheckpointLoader::~DraftCheckpointLoader() = default;
@@ -95,6 +96,10 @@ WeightFile DraftCheckpointLoader::layer(uint32_t index) {
 }
 WeightFile DraftCheckpointLoader::model() {
   return images_.load(affine::imagePlan(planned_, planned_->images.size() - 1, "draft"));
+}
+
+bool DraftCheckpointLoader::hasMaskEmbedding() const noexcept {
+  return planned_->source.find(kDraftMaskEmbedding) != nullptr;
 }
 
 } // namespace justfit::model

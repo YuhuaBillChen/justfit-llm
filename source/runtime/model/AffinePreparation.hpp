@@ -8,7 +8,7 @@
 // them. An MLX projection's codes, scales and biases are reordered into
 // 256-row tiles without requantization, a BF16 projection is quantized into
 // the same tiles as MLX's affine quantization rounds it, the GDN decay becomes
-// float(-exp(double(A_log))), and every other tensor is copied as stored.
+// MLX-compatible GPU FP32 -precise::exp(A_log), and every other tensor is copied as stored.
 
 #include "model/WeightSource.hpp"
 
@@ -59,6 +59,9 @@ struct Image {
   std::vector<Section> sections;
   std::vector<std::pair<std::string, uint32_t>> quantized;
 };
+
+// Preserve the MLX GPU FP32 decay transform; host libm has different rounding.
+void writeAffineDecay(std::span<const float> logarithms, std::span<float> destination);
 
 // Writes every byte of a bound image into destination, which is its size.
 void writeAffineImage(std::span<uint8_t> destination, const Image &image);

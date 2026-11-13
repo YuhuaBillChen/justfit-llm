@@ -63,7 +63,7 @@ struct SchedulerSnapshot final {
 // One single-owner scheduling policy. Prefill batches the shortest remaining
 // sequences first into an actual-row budget, with a bound on how often later
 // arrivals may overtake a lane; decode takes the ready lanes of one priority,
-// constraint mode and stage without waiting for more, so it runs only the
+// and stage, mixing constraint modes only within the configured limit, so it runs only the
 // four real M8/M16/M24/M32 shapes.
 class Scheduler final {
 public:

@@ -4,12 +4,14 @@
 #include "engine/KvCache.hpp"
 #include "engine/KvPool.hpp"
 #include "engine/KvTier.hpp"
+#include "engine/ReclaimClass.hpp"
 #include "engine/StateCache.hpp"
 #include "model/Model.hpp"
 #include "model/SlotFile.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -112,6 +114,7 @@ struct CacheSnapshot final {
   // A persistent tier, and what the start took back from it.
   bool persistent = false;
   CacheAdoption adoption;
+  KvCache::Residency kvResidency;
 };
 
 enum class TokenAdmissionFailure : uint8_t {
@@ -169,7 +172,6 @@ enum class CacheReclaimMode { KeepExtents, ReleaseExtents, ReusePages };
 // after all of those, the states unfinished requests use and the KV they
 // restore through, for other running work (any other resident lane, or a
 // start no resident lane precedes) and for pressure passes.
-enum class ReclaimClass : uint8_t { Ordinary, InUse };
 
 // Whether the caller can wait for KV memory a step leaves to come back.
 // CanWait (growth and pressure passes): a KV leaf a state needs is written
@@ -291,8 +293,15 @@ public:
                                               const CacheLookup &lookup);
   [[nodiscard]] KvRestoreStatus kvRestoreStatus(uint64_t requestId) const;
 
-  [[nodiscard]] TokenAdmission ensureTokens(uint64_t requestId,
-                                            uint64_t tokenCount);
+  // Gives the request pages for its first tokenCount tokens, which the work
+  // they are for writes below writtenTokens, all of them unless said
+  // otherwise. A new page with a row the work does not write comes cleared:
+  // attention weighs the rows past the request's end by zero, and a BF16
+  // value is read as stored, so a non-finite one the page's previous holder
+  // left there would reach the request as 0 x NaN.
+  [[nodiscard]] TokenAdmission
+  ensureTokens(uint64_t requestId, uint64_t tokenCount,
+               uint64_t writtenTokens = std::numeric_limits<uint64_t>::max());
   // The request's page list. Its revision moves on every change of the
   // list, and the list differs from the one at revision - 1 from
   // firstChanged on.
@@ -328,6 +337,15 @@ public:
   [[nodiscard]] bool stateResident(uint64_t kvBlock) const noexcept;
   // False only while this exact disposable publication is pinned.
   bool retireCheckpointState(StateCheckpoint checkpoint) noexcept;
+  void dropCheckpointsOnReclaim(bool drop) noexcept { states_.dropCheckpointsOnReclaim(drop); }
+  void spareCheckpoint(uint64_t kvBlock) noexcept { states_.spareCheckpoint(kvBlock); }
+  void protectCheckpoint(uint64_t kvBlock) { states_.protectCheckpoint(kvBlock); }
+  // A finished request's pages stay as they are under parkId, its full
+  // blocks shared through the cache and its last, partly written page its
+  // own, up to `tokens`: a later request continues from there
+  // (adoptParked). Ending the park id gives them up as endRequest does.
+  void parkRequest(uint64_t requestId, uint64_t parkId, uint32_t tokens);
+  void adoptParked(uint64_t parkId, uint64_t requestId);
 
   // Releases every empty extent, but one with keepRunway, and returns the
   // bytes released.

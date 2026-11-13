@@ -909,7 +909,8 @@ kernel void decode_sample_vocabulary_draw(
           drafted ? input_tokens[s + 1] : 0u,
           draft_ids + position * kDraftCandidates,
           draft_probabilities + position * kDraftCandidates,
-          uniforms[ulong(batch) * JUSTFIT_SAMPLING_UNIFORMS + params.uniform],
+          uniforms[ulong(batch) * JUSTFIT_SAMPLING_UNIFORMS +
+                   (params.row_uniforms ? JUSTFIT_UNIFORM_TREE_DRAWS + index : params.uniform)],
           ranges + ulong(s) * kVocabularyRanges, arrivals + s,
           group % kVocabularyGroups, scratch, thread_index, lane, simd_group,
           token, draft_probability) &&

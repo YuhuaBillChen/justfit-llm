@@ -1,42 +1,10 @@
-# Modified for JustFit: product identity and integration.
+# Native SDK: production compiler recipes match the qualified development build.
 XCRUN := xcrun
 CXX := $(XCRUN) -sdk macosx clang++
 METAL := $(XCRUN) -sdk macosx metal
 METALLIB := $(XCRUN) -sdk macosx metallib
 AR := $(XCRUN) -sdk macosx ar
-SYSTEM_NAME := $(shell uname -s)
-SYSTEM_ARCH := $(shell uname -m)
-VENV := .venv
-PYTHON = $(VENV)/bin/python
-# Holds the hash of the requirements the environment was last installed from.
-VENV_STAMP = $(VENV)/.requirements-installed
-# Held while the environment is set up. lockf waits for it without a word, so
-# each wait for it is announced first.
-INSTALL_LOCK = $(VENV).install.lock
-ANNOUNCE_INSTALL_WAIT = /usr/bin/lockf -s -k -t 0 "$(INSTALL_LOCK)" true \
-	|| echo "Another setup of $(VENV) is running; waiting..."
-REQUIREMENTS := install/requirements.txt
-PYTHON_CANDIDATES ?= python3.13 python3 python3.12 python3.14
-BUILD_ID_PYTHON ?= python3
-JUSTFIT_MAKEFILE := $(abspath $(firstword $(MAKEFILE_LIST)))
-MODEL ?=
-# MODEL with the installer's source options selects one installation
-# (DEVELOPMENT.md, Upstream model loading); every model target passes them.
-# LANGUAGE_ONLY=1 selects the text-only installation; 0 or empty, the one
-# with vision.
-REVISION ?=
-DRAFT_MODEL ?=
-LANGUAGE_ONLY ?=
-MODEL_ARGS = --model "$(MODEL)" $(if $(REVISION),--revision "$(REVISION)") \
-	$(if $(DRAFT_MODEL),--draft-model "$(DRAFT_MODEL)") \
-	$(if $(filter 1,$(LANGUAGE_ONLY)),--language-only)
-MODEL_INSTALL = $(PYTHON) install/models.py $(MODEL_ARGS)
-# The installation's selection link, as the installer names it.
-MODEL_ROOT = $(if $(MODEL),$(shell $(MODEL_INSTALL) link))
-# Where the release targets record the model's results. No ':' in the name:
-# CI's artifact upload refuses paths holding one.
-MODEL_RESULTS = build/release/$(subst :,--,$(subst /,--,$(MODEL)))
-
+JUSTFIT_BUILD_HELPER ?= ../rust/frontend/target/release/justfit-rs build-helper
 BUILD := build
 TARGET := $(BUILD)/justfit-engine
 METAL_BUILD := $(BUILD)/metal
@@ -65,113 +33,8 @@ ENGINE_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Werror -Iruntime \
 	$(MACOS_TARGET_FLAG)
 ENGINE_OBJCXXFLAGS := $(ENGINE_CXXFLAGS) -fobjc-arc
 LIB := $(BUILD)/justfit.metallib
-.PHONY: all clean force-build-identity install \
-	install-environment _install-environment \
-	platform-check model-selection preflight
-
+.PHONY: all force-build-identity
 all: $(TARGET)
-
-# The installer checks a model's configuration with the engine (build/justfit-engine
-# model-check) before it downloads any weight. It takes the models' own lock
-# for what it writes; the download holds up no other setup of the
-# environment.
-install: model-selection platform-check install-environment $(TARGET)
-	$(MODEL_INSTALL) prepare
-
-model-selection:
-	@test -n "$(MODEL)" || { \
-		echo "error: set MODEL to a model ID as justfit serve --model takes it (OWNER/REPO[:VARIANT])" >&2; \
-		exit 1; \
-	}
-	@case "$(LANGUAGE_ONLY)" in ""|0|1) ;; *) \
-		echo "error: LANGUAGE_ONLY is 1 (text only) or 0" >&2; \
-		exit 1;; \
-	esac
-
-platform-check:
-	@test "$(SYSTEM_NAME)" = Darwin && test "$(SYSTEM_ARCH)" = arm64 || { \
-		echo "error: JustFit requires an Apple Silicon Mac" >&2; \
-		exit 1; \
-	}
-	@command -v "$(XCRUN)" >/dev/null 2>&1 || { \
-		echo "error: Xcode with Metal tools is required" >&2; \
-		exit 1; \
-	}
-	@for tool in clang++ metal metallib; do \
-		"$(XCRUN)" -sdk macosx -f "$$tool" >/dev/null 2>&1 || { \
-			echo "error: Xcode with Metal tools is required (missing $$tool)" >&2; \
-			exit 1; \
-		}; \
-	done
-
-install-environment:
-	@$(ANNOUNCE_INSTALL_WAIT)
-	@/usr/bin/lockf -k "$(INSTALL_LOCK)" $(MAKE) --no-print-directory \
-		-f "$(JUSTFIT_MAKEFILE)" _install-environment
-
-# The environment is created from the interpreter under the candidate's
-# installation prefix (sys.base_prefix). A symlinked launcher, such as uv's,
-# names a directory without the standard library, and a resolved path names a
-# versioned Homebrew keg that brew upgrade deletes; Homebrew's prefix is its
-# stable opt path.
-_install-environment:
-	@set -eu; \
-	if test -f "$(VENV)/pyvenv.cfg" && test -x "$(PYTHON)" \
-		&& "$(PYTHON)" -c 'import sys; raise SystemExit(not ((3, 12) <= sys.version_info[:2] < (3, 15) and sys.prefix != sys.base_prefix))' \
-			>/dev/null 2>&1 \
-		&& "$(PYTHON)" -m pip --version >/dev/null 2>&1; then \
-		:; \
-	else \
-		bootstrap=; \
-		for candidate in $(PYTHON_CANDIDATES); do \
-			command -v "$$candidate" >/dev/null 2>&1 || continue; \
-			base=$$("$$candidate" -c 'import os, sys; path = os.path.join(sys.base_prefix, "bin", "python%d.%d" % sys.version_info[:2]); print(path if os.path.exists(path) else getattr(sys, "_base_executable", sys.executable))') \
-				|| continue; \
-			"$$base" -c 'import sys; raise SystemExit(not ((3, 12) <= sys.version_info[:2] < (3, 15)))' \
-				>/dev/null 2>&1 || continue; \
-			bootstrap=$$base; \
-			break; \
-		done; \
-		test -n "$$bootstrap" || { \
-			echo "error: Python 3.12, 3.13, or 3.14 is required" >&2; \
-			exit 1; \
-		}; \
-		if test -L "$(VENV)"; then \
-			echo "error: refusing to rebuild symlinked environment $(VENV)" >&2; \
-			exit 1; \
-		fi; \
-		if test -e "$(VENV)"; then \
-			test -d "$(VENV)" && test -f "$(VENV)/pyvenv.cfg" || { \
-				echo "error: refusing to clear non-venv path $(VENV)" >&2; \
-				exit 1; \
-			}; \
-			echo "Rebuilding unsupported or broken environment in $(VENV)..."; \
-			"$$bootstrap" -m venv --clear "$(VENV)"; \
-		else \
-			"$$bootstrap" -m venv "$(VENV)"; \
-		fi; \
-	fi; \
-	hash=$$(shasum -a 256 "$(REQUIREMENTS)" | awk '{print $$1}'); \
-	if test "$$(cat "$(VENV_STAMP)" 2>/dev/null)" = "$$hash"; then \
-		exit 0; \
-	fi; \
-	rm -f "$(VENV_STAMP)"; \
-	"$(PYTHON)" -m pip install --only-binary=:all: -r "$(REQUIREMENTS)"; \
-	"$(PYTHON)" -m pip check; \
-	tmp=$$(mktemp "$(VENV_STAMP).tmp.XXXXXX"); \
-	trap 'rm -f "$$tmp"' EXIT INT TERM; \
-	echo "$$hash" > "$$tmp"; \
-	mv "$$tmp" "$(VENV_STAMP)"; \
-	trap - EXIT INT TERM
-
-preflight: model-selection
-	@test -x $(PYTHON) || { \
-		echo "error: JustFit is not installed; run 'make install MODEL=$(MODEL)' first" >&2; \
-		exit 1; \
-	}
-	@$(MODEL_INSTALL) verify
-	@$(PYTHON) -m pip check >/dev/null
-	@TRANSFORMERS_VERBOSITY=error $(PYTHON) -c 'import server.server'
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -194,9 +57,9 @@ ENGINE_LINKFLAGS := -framework Foundation -framework Metal -framework IOKit \
 ENGINE_DEPFLAGS := -MMD -MP
 # Configuration belongs to each successful output, not to a shared timestamp:
 # macOS make can treat a new stamp and an old binary in the same second as equal.
-BUILD_CONFIG_TOOL := dev/tools/build_config.py
-BUILD_RULES_DIGEST := $(shell shasum -a 256 Makefile dev/native.mk \
-	$(BUILD_CONFIG_TOOL) | shasum -a 256 | cut -c1-16)
+BUILD_CONFIG_TOOL := build-config
+BUILD_RULES_DIGEST := $(shell shasum -a 256 Makefile $(wildcard dev/native.mk) \
+	../rust/frontend/src/build_helpers.rs | shasum -a 256 | cut -c1-16)
 shell-quote = '$(subst ','"'"',$(1))'
 CONFIG_DIGEST := $(shell printf '%s\0' $(BUILD_RULES_DIGEST) \
 	$(call shell-quote,$(CXX)) $(call shell-quote,$(ENGINE_CXXFLAGS)) \
@@ -204,10 +67,10 @@ CONFIG_DIGEST := $(shell printf '%s\0' $(BUILD_RULES_DIGEST) \
 	$(call shell-quote,$(ENGINE_LINKFLAGS)) $(call shell-quote,$(AR)) \
 	$(call shell-quote,$(METAL)) $(call shell-quote,$(PROD_METALFLAGS)) \
 	$(call shell-quote,$(METALLIB)) | shasum -a 256 | cut -c1-16)
-RUN_CONFIGURED = $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) record \
+RUN_CONFIGURED = $(JUSTFIT_BUILD_HELPER) $(BUILD_CONFIG_TOOL) record \
 	--output $(call shell-quote,$@) --config $(BUILD_CONFIG) --
 BUILD_INPUTS = $(filter-out force-build-config,$^)
-BUILD_ID_SCRIPT := dev/tools/build_identity.py
+BUILD_ID_SCRIPT := build-identity
 BUILD_ID_HEADER := $(ENGINE_BUILD)/BuildIdentity.hpp
 BUILD_ID_STAMP := $(ENGINE_BUILD)/build-identity.json
 PRODUCTION_ENGINE_INPUTS := $(sort $(shell find runtime -type f \
@@ -298,6 +161,7 @@ ENGINE_MM_SOURCES := \
 	runtime/ane/Handoff.mm \
 	runtime/ane/Program.mm \
 	runtime/model/SafetensorsCheckpoint.mm \
+	runtime/model/AffineDecay.mm \
 	runtime/model/ModelDescriptor.mm \
 	runtime/engine/RuntimeResources.mm \
 	runtime/engine/Bootstrap.mm
@@ -319,7 +183,7 @@ $(ENGINE_BUILD): | $(BUILD)
 	mkdir -p $@
 
 $(BUILD_ID_STAMP): force-build-identity | $(ENGINE_BUILD)
-	@$(BUILD_ID_PYTHON) $(BUILD_ID_SCRIPT) write --root . \
+	@$(JUSTFIT_BUILD_HELPER) $(BUILD_ID_SCRIPT) write --root . \
 		--header $(BUILD_ID_HEADER) --stamp $(BUILD_ID_STAMP) \
 		$(BUILD_ID_CONSTANT_ARGS) >/dev/null
 
@@ -363,50 +227,19 @@ $(TARGET): $(ENGINE_MAIN_OBJECT) $(ENGINE_LIBRARY) $(LIB) \
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_OBJCXXFLAGS) $(ENGINE_MAIN_OBJECT) $(ENGINE_LIBRARY) \
 		$(ENGINE_LINKFLAGS) -o $@
 
-clean:
-	rm -rf $(BUILD)
-
--include dev/Makefile
-
-# The dev include extends these output sets. Check each set in one read-only
-# process; a mismatched output has a real force dependency even within one
-# timestamp tick. Only its successful recipe updates its .config record.
 .PHONY: force-build-config
 force-build-config:
-
-# Removing a wildcard input removes its timestamp dependency too. Record the
-# input names with the affected Metal outputs: header changes recompile AIRs,
-# while source-set changes only relink the production metallib.
-KERNEL_HEADER_NAMES_DIGEST := $(shell printf '%s\0' $(sort $(KERNEL_HEADERS)) \
-	| shasum -a 256 | cut -c1-16)
-KERNEL_SOURCE_NAMES_DIGEST := $(shell printf '%s\0' $(sort $(PRODUCTION_KERNEL_SOURCES)) \
-	| shasum -a 256 | cut -c1-16)
+KERNEL_HEADER_NAMES_DIGEST := $(shell printf '%s\0' $(sort $(KERNEL_HEADERS)) | shasum -a 256 | cut -c1-16)
+KERNEL_SOURCE_NAMES_DIGEST := $(shell printf '%s\0' $(sort $(PRODUCTION_KERNEL_SOURCES)) | shasum -a 256 | cut -c1-16)
 PRODUCTION_AIR_CONFIG := $(CONFIG_DIGEST)-$(KERNEL_HEADER_NAMES_DIGEST)
 PRODUCTION_LIB_CONFIG := $(PRODUCTION_AIR_CONFIG)-$(KERNEL_SOURCE_NAMES_DIGEST)
-TEST_KERNEL_CONFIG := $(TEST_CONFIG_DIGEST)-$(KERNEL_HEADER_NAMES_DIGEST)
-TEST_KERNEL_CONFIG_TARGETS := $(TEST_Q8_KERNEL_AIRS) $(TEST_RESIDENCY_AIR) \
-	$(TEST_Q8_ATTENTION_LIB) $(TEST_GGUF_DEQUANT_AIR) $(TEST_GGUF_DEQUANT_LIB)
 PRODUCTION_CONFIG_TARGETS := $(filter-out $(PRODUCTION_AIRS) $(LIB),$(PRODUCTION_CONFIG_TARGETS))
-TEST_CONFIG_TARGETS := $(filter-out $(TEST_KERNEL_CONFIG_TARGETS),$(TEST_CONFIG_TARGETS))
-
 $(PRODUCTION_CONFIG_TARGETS): BUILD_CONFIG := $(CONFIG_DIGEST)
-$(TEST_CONFIG_TARGETS): BUILD_CONFIG := $(TEST_CONFIG_DIGEST)
-$(SANITIZER_CONFIG_TARGETS): BUILD_CONFIG := $(SANITIZER_CONFIG_DIGEST)
 $(PRODUCTION_AIRS): BUILD_CONFIG := $(PRODUCTION_AIR_CONFIG)
 $(LIB): BUILD_CONFIG := $(PRODUCTION_LIB_CONFIG)
-$(TEST_KERNEL_CONFIG_TARGETS): BUILD_CONFIG := $(TEST_KERNEL_CONFIG)
-STALE_CONFIG_TARGETS := $(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
-	--config $(CONFIG_DIGEST) $(PRODUCTION_CONFIG_TARGETS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
-	--config $(TEST_CONFIG_DIGEST) $(TEST_CONFIG_TARGETS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
-	--config $(SANITIZER_CONFIG_DIGEST) $(SANITIZER_CONFIG_TARGETS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
-	--config $(PRODUCTION_AIR_CONFIG) $(PRODUCTION_AIRS)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
-	--config $(PRODUCTION_LIB_CONFIG) $(LIB)) \
-	$(shell $(BUILD_ID_PYTHON) $(BUILD_CONFIG_TOOL) stale \
-	--config $(TEST_KERNEL_CONFIG) $(TEST_KERNEL_CONFIG_TARGETS))
+STALE_CONFIG_TARGETS := $(shell $(JUSTFIT_BUILD_HELPER) $(BUILD_CONFIG_TOOL) stale --config $(CONFIG_DIGEST) $(PRODUCTION_CONFIG_TARGETS)) \
+ $(shell $(JUSTFIT_BUILD_HELPER) $(BUILD_CONFIG_TOOL) stale --config $(PRODUCTION_AIR_CONFIG) $(PRODUCTION_AIRS)) \
+ $(shell $(JUSTFIT_BUILD_HELPER) $(BUILD_CONFIG_TOOL) stale --config $(PRODUCTION_LIB_CONFIG) $(LIB))
 ifneq ($(strip $(STALE_CONFIG_TARGETS)),)
 $(STALE_CONFIG_TARGETS): force-build-config
 endif

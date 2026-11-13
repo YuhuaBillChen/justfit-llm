@@ -9,12 +9,16 @@
     "JUSTFIT_VISION_PHASE": "1",
     "JUSTFIT_COMPACT_SOFTMAX": "1",
     "JUSTFIT_VERIFY_COALESCED": "1",
-    "JUSTFIT_LOOKUP": "0",
+    "JUSTFIT_LOOKUP": "1",
     "JUSTFIT_HOST_EMBEDDING": "1",
     "JUSTFIT_ELASTIC_PREFILL": "1",
     "JUSTFIT_ANE_PHASE": "0",
     "JUSTFIT_LAYERED_PREFILL": "1",
     "JUSTFIT_DECODE_CHECKPOINT": "128",
+    "JUSTFIT_CHECKPOINT_RAM_ONLY": "1",
+    "JUSTFIT_PARKED": "1",
+    "JUSTFIT_TREE": "1",
+    "JUSTFIT_TREE_ROWS": "8",
     "JUSTFIT_CPU_PREFILL": "1",
     "JUSTFIT_CPU_TRACE": "1",
     "JUSTFIT_CPU_FRACTION": ".16",
@@ -36,18 +40,20 @@
     "JUSTFIT_CPU_GPU_FUSION_ORDER": "1",
     "JUSTFIT_CPU_GPU_SUM_ORDER": "1",
     "JUSTFIT_CPU_GPU_UP_EPILOGUE": "1",
-    "JUSTFIT_DISABLE_PREFIX_REUSE": "0"
+    "JUSTFIT_DISABLE_PREFIX_REUSE": "0",
+    "JUSTFIT_MIXED_DECODE_MAX_LANES": "2"
   },
-  "command": [
-    "{release}/venv/bin/python",
-    "-u",
-    "-m",
-    "server.server",
-    "{model}",
+  "vision_phase_qualification": {
+    "prefill": true,
+    "decode": true
+  },
+  "note": "Language-independent reference parameters; runtime and assets are provisioned locally.",
+  "schema": 2,
+  "server_arguments": [
     "--tokenizer",
     "{model}/tokenizer",
     "--model",
-    "incoai/Qwen3.8-27B-Splash",
+    "mlx-community/Qwen3.8-27B-4bit",
     "--binary",
     "{release}/source/build/justfit-engine",
     "--host",
@@ -57,22 +63,20 @@
     "--max-memory",
     "22015M",
     "--host-reserve",
-    "128M",
+    "256M",
     "--kv-format",
     "tq4",
     "--disable-ane",
     "--persistent-cache",
     "--max-cache-disk",
-    "128G",
+    "64G",
     "--cache-dir",
     "{cache}",
     "--request-timeout",
     "7200",
     "--no-webui"
   ],
-  "vision_phase_qualification": {
-    "prefill": true,
-    "decode": true
-  },
-  "note": "Reference preset; historical PYTHONPATH removed in favor of pinned dependencies; assets and runtime state are provisioned locally."
+  "served_model_names": [
+    "incoai/Qwen3.8-27B-Splash"
+  ]
 }

@@ -486,4 +486,58 @@ void PagedAttention::addVerify(metal::CommandGraph &graph, JustFitKvLayer layer,
             attention, plan.reduceGroups);
 }
 
+namespace {
+std::vector<metal::MetalBuffer> bufferList(const metal::ComputeDispatch &dispatch) {
+  std::vector<metal::MetalBuffer> buffers;
+  for (const auto &binding : dispatch.buffers) buffers.push_back(binding.buffer);
+  return buffers;
+}
+} // namespace
+
+void PagedAttention::addVerifyTree(metal::CommandGraph &graph, JustFitKvLayer layer,
+                                   PagedVerifyBuffers buffers,
+                                   std::span<const kv::ChunkedPrefillParams> chunks,
+                                   const VerifyAttentionPlan &plan, const JustFitTreeBatch &tree) {
+  if (plan.lanes > 2) throw std::invalid_argument("tree verify attention takes at most two lanes");
+  metal::CommandGraph probe;
+  addVerify(probe, layer, std::move(buffers), chunks, plan);
+  const auto dispatches = probe.dispatches();
+  const auto bare = [](std::string name) { return name.starts_with("wide16::") ? name.substr(8) : name; };
+  if (dispatches.size() != 4 || bare(dispatches[2].pipelineName) != "verify_attention_tq4_rot_split_rows8_coalesced")
+    throw std::invalid_argument("tree verify attention needs the TQ4 rotated coalesced verify");
+  for (uint32_t i = 0; i < 2; ++i) {
+    const auto &d = dispatches[i];
+    std::vector<uint8_t> bytes(static_cast<const uint8_t *>(d.bytes.front().data),
+                               static_cast<const uint8_t *>(d.bytes.front().data) + d.bytes.front().sizeBytes);
+    if (bytes.size() != sizeof(std::array<kv::ChunkedPrefillParams, JUSTFIT_MAXIMUM_BATCH_WIDTH>))
+      throw std::logic_error("unexpected verify store parameters");
+    std::array<kv::ChunkedPrefillParams, JUSTFIT_MAXIMUM_BATCH_WIDTH> params{};
+    std::memcpy(params.data(), bytes.data(), bytes.size());
+    graph.add(d.pipelineName, bufferList(d), params, d.threadgroups, d.threadsPerThreadgroup);
+  }
+  JustFitTreeAttentionParams params{};
+  if (dispatches[2].bytes.front().sizeBytes < sizeof(params.lane))
+    throw std::logic_error("unexpected verify attention parameters");
+  std::memcpy(params.lane, dispatches[2].bytes.front().data, sizeof(params.lane));
+  params.tree = tree;
+  graph.add("verify_attention_tq4_rot_split_tree", bufferList(dispatches[2]), params,
+            dispatches[2].threadgroups, dispatches[2].threadsPerThreadgroup);
+  graph.add("verify_attention_tq4_rot_reduce_tree", bufferList(dispatches[3]), params,
+            dispatches[3].threadgroups, dispatches[3].threadsPerThreadgroup);
+}
+
+void PagedAttention::addVerifyStore(metal::CommandGraph &graph, JustFitKvLayer layer,
+                                    PagedVerifyBuffers buffers,
+                                    std::span<const kv::ChunkedPrefillParams> chunks,
+                                    const VerifyAttentionPlan &plan) {
+  metal::CommandGraph probe;
+  addVerify(probe, layer, std::move(buffers), chunks, plan);
+  const auto &d = probe.dispatches().front();
+  std::array<kv::ChunkedPrefillParams, JUSTFIT_MAXIMUM_BATCH_WIDTH> params{};
+  if (d.bytes.front().sizeBytes != sizeof(params)) throw std::logic_error("unexpected verify store parameters");
+  std::memcpy(params.data(), d.bytes.front().data, sizeof(params));
+  graph.add(d.pipelineName, bufferList(d), params, d.threadgroups, d.threadsPerThreadgroup);
+}
+
 } // namespace justfit::ops
+

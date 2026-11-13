@@ -52,7 +52,8 @@ void readRows(const WeightSource &source, const gguf::TensorRows &rows, uint64_t
     uint64_t run = 1;
     if (span == rows.rowBytes)
       while (row + run < count && sourceRow(rows, first + row + run) == start + run) ++run;
-    source.readData(rows.offset + start * rows.rowBytes + column, {to + row * span, run * span});
+    const WeightSource &part = rows.file ? *rows.file : source;
+    part.readData(rows.offset + start * rows.rowBytes + column, {to + row * span, run * span});
     row += run;
   }
 }

@@ -86,6 +86,7 @@ private:
     if (ops::activeVerifyRows() == 16 &&
         (pipeline.starts_with("verify_attention_") || pipeline.starts_with("verify_gdn_") ||
          pipeline.starts_with("decode_sample_") || pipeline == "decode_accept_dflash" ||
+         pipeline.starts_with("verify_tree_") ||
          pipeline == "draft_context_kv_commit")) pipeline = "wide16::" + pipeline;
     dispatch.pipelineName = std::move(pipeline);
     dispatch.threadgroups = groups;

@@ -21,3 +21,8 @@ struct VerifyInputBatchParams {
 
 static_assert(sizeof(VerifyInputBatchParams) == 4,
               "Verify input parameters are 4 bytes on both sides");
+
+struct DraftMaskRowsParams {
+  uint32_t width;
+};
+static_assert(sizeof(DraftMaskRowsParams) == 4);

@@ -1,0 +1,16 @@
+{
+  "schema": 2,
+  "product": "JustFit",
+  "version": "2.6.0",
+  "platform": "macOS 27 or later, arm64",
+  "native_binaries": {
+    "source/build/justfit-engine": "C++/Objective-C++ engine built from source/runtime with the Xcode toolchain",
+    "source/build/justfit-rs": "Rust frontend (bin/justfit) built from rust/frontend, source paths remapped",
+    "source/build/JustFitVision.app": "Rust ANE vision worker built from rust/ane-worker, source paths remapped",
+    "vision-tools/libcoreai_bridge.dylib": "Swift bridge built from vision-tools/CoreAIBridge.swift",
+    "vision-tools/attributed_memory.dylib": "C helper built from vision-tools/attributed_memory.c",
+    "source/build/libpdfium.dylib": "Prebuilt PDFium, see config/native-libraries.json"
+  },
+  "signing": "The JustFit native binaries and libraries are signed with Developer ID Application team 68M2VQ7A96 and a secure timestamp; they are not notarized. PDFium keeps its upstream ad-hoc signature.",
+  "hashes": "runtime/runtime.zip carries runtime.json with the SHA-256 of every native output; package-manifest.json pins every packaged file."
+}

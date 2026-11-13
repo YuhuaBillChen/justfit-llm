@@ -4,6 +4,7 @@
 #include "model/DraftCheckpoint.hpp"
 #include "model/GgufTarget.hpp"
 #include "model/QwenTargetLoader.hpp"
+#include "model/SafetensorsCheckpoint.hpp"
 #include "model/VisionLoader.hpp"
 
 #include <functional>
@@ -92,7 +93,7 @@ LoadedModel loadModel(metal::MetalBackend &backend,
           return readTarget(backend, layout, std::ref(loader));
         }
         case TargetSource::Gguf: {
-          GgufTargetLoader loader(backend, images, findTargetGguf(directory), layout);
+          GgufTargetLoader loader(backend, images, findTargetGgufs(directory), layout);
           return readTarget(backend, layout, std::ref(loader));
         }
         }
@@ -120,16 +121,18 @@ LoadedModel loadModel(metal::MetalBackend &backend,
 uint64_t modelWeightBytes(const std::filesystem::path &root, const ModelDescriptor &descriptor) {
   uint64_t bytes = 0;
   if (descriptor.targetSource == TargetSource::Gguf) {
-    WeightSource source(findTargetGguf(root / "target"));
-    const GgufFile file(source);
+    OpenGguf source(findTargetGgufs(root / "target"));
+    const GgufFile &file = source.file();
     bytes = std::visit(
         [&](const auto &layout) { return imageBytes(gguf::planImages(file, layout)); },
         descriptor.target);
   } else if (descriptor.targetSource == TargetSource::Mlx) {
     bytes = std::visit([](const auto &layout) { return imageBytes(affineTargetImages(layout)); }, descriptor.target);
   }
-  if (descriptor.draftFromCheckpoint())
-    bytes += imageBytes(draftCheckpointImages(descriptor.draft));
+  if (descriptor.draftFromCheckpoint()) {
+    SafetensorsCheckpoint checkpoint(root / "draft");
+    bytes += imageBytes(draftCheckpointImages(descriptor.draft, checkpoint.find(kDraftMaskEmbedding) != nullptr));
+  }
   if (descriptor.visionSource == VisionSource::Mlx || descriptor.visionSource == VisionSource::Gguf)
     bytes += visionImageBytes(descriptor.vision);
   for (std::string_view directory : {"target", "draft", "vision"}) {

@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "architecture": "arm64",
+  "libraries": {
+    "source/build/libpdfium.dylib": {
+      "provider": "bblanchon/pdfium-binaries",
+      "version": "158.0.8125.0",
+      "tag": "chromium/8125",
+      "release_commit": "4bdb7acd45b39ef6a7fc2a5b4c83f0398e45c9a6",
+      "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8125/pdfium-mac-arm64.tgz",
+      "archive_sha256": "4939bd935ac83ddc09a3a4f038bc43a19cea1660316a3667f26cb07a070e139d",
+      "archive_bytes": 3540999,
+      "member": "lib/libpdfium.dylib",
+      "sha256": "a45c44645523968525c710462691dd974f4efb1013ce1c249919a0939cfb373a",
+      "bytes": 7388864,
+      "license_file": "config/licenses/pdfium-158.0.8125.0.txt",
+      "license_sha256": "f801688daaf1d05041651372350ae726e8b08c3063bcabdb756ff994971a8cba",
+      "upstream_license_members": {
+        "LICENSE": "ba26c1263131696b86c10496b5066b918a20b7161822a80c274d0080105f6c93",
+        "licenses/abseil.txt": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747",
+        "licenses/agg23.txt": "c110d3ea2ad77467ce0dcff7d3337e6c8be8049a5103f4b9bd5fd911a77972e5",
+        "licenses/dragonbox-Apache2-LLVM.txt": "9e45e856bedccee9f67254082ca11851d954de2fed7448c4bed19ad9aab99a91",
+        "licenses/dragonbox-Boost.txt": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+        "licenses/fast_float.txt": "e562f3f974ced7e69dd1db77b820b36bcf8f30377f1aa105723fba449c53c4e6",
+        "licenses/freetype.txt": "f4b133e25df1f86ad3ffea453aa0e613f0474f34778dbbb3e437e7b2724937d8",
+        "licenses/harfbuzz.txt": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64",
+        "licenses/highway.txt": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "licenses/icu.txt": "e55522d81edc687a341a4411e0776e54ca654e90147f354a90458aaced4116af",
+        "licenses/lcms.txt": "7312b68c5b25e9bf2b828706fb4e29588f22705112f411fd42e1f7d84c3d139a",
+        "licenses/libjpeg_turbo.ijg": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6",
+        "licenses/libjpeg_turbo.md": "96f5b328adbb78eeaaec6980d73fd558cb1e4d62560ed615646bc3cf5e532430",
+        "licenses/libopenjpeg.txt": "c5ab0890a737c2dfa7ba675036554f6d17741d98629b0c2a145354d00617e6b2",
+        "licenses/libpng.txt": "bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526",
+        "licenses/llvm-libc.txt": "ebcd9bbf783a73d05c53ba4d586b8d5813dcdf3bbec50265860ccc885e606f47",
+        "licenses/pdfium.txt": "1fe9dea718fbd75cf149adaf4d8a22a4335604d964ddb76d1b45383dec8668c9",
+        "licenses/simdutf.txt": "fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f",
+        "licenses/zlib.txt": "33fd641c9f3b0e0be64bc78fea9e94807674cdd70c48477599226cb8956565fe"
+      }
+    }
+  },
+  "system_libraries": {
+    "zlib": {
+      "path": "/usr/lib/libz.dylib",
+      "resolution": "dyld shared cache; dlopen and ABI validation, not filesystem existence"
+    }
+  }
+}

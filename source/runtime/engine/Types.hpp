@@ -4,6 +4,7 @@
 #include "model/Model.hpp"
 
 #include <cstdint>
+#include <stdexcept>
 #include <span>
 #include <string>
 #include <string_view>
@@ -124,6 +125,11 @@ public:
   virtual void tokens(uint64_t requestId, std::span<const uint32_t> tokens) = 0;
   virtual void maskRequested(uint64_t requestId,
                              std::span<const uint32_t> simulationTokens) = 0;
+  // Experiment (JUSTFIT_TREE): the masks of a draft tree's rows
+  // (protocol::MaskRequestEvent::simulationParents).
+  virtual void maskTreeRequested(uint64_t, std::span<const uint32_t>, std::span<const uint32_t>) {
+    throw std::logic_error("this event sink takes no tree masks");
+  }
   virtual void completed(uint64_t requestId, EngineFinishReason reason,
                          uint32_t promptTokens, uint32_t completionTokens,
                          std::span<const float> optionLogits) = 0;

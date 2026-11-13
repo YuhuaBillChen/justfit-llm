@@ -189,6 +189,7 @@ struct QwenTarget::VerifyStep {
   std::optional<ops::MoePlan> moe{};
   uint32_t gdnLayer = 0;
   uint32_t attentionLayer = 0;
+  const JustFitTreeBatch *tree = nullptr;
 };
 
 metal::MetalBuffer QwenTarget::addPrefill(
@@ -362,7 +363,8 @@ void QwenTarget::addPrefillFfn(PrefillStep &step, uint32_t, const Qwen3_6MoeLaye
 void QwenTarget::addVerify(
     metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers,
     std::span<const JustFitKvLayer> kvLayers,
-    std::span<const kv::ChunkedPrefillParams> chunks, uint32_t lanes) const {
+    std::span<const kv::ChunkedPrefillParams> chunks, uint32_t lanes,
+    const JustFitTreeBatch *tree) const {
   if (!lanes || lanes > ExecutionLimits::maximumBatchWidth || chunks.size() != lanes ||
       kvLayers.size() != geometry_.kvLayout.attentionLayers ||
       buffers.gdnPacked.size() != geometry_.stateLayout.layers ||
@@ -380,6 +382,7 @@ void QwenTarget::addVerify(
   VerifyStep step{graph, buffers, kvLayers, chunks, lanes, rows,
                   operators_.verifyAttention(lanes, geometry_.attentionQueryHeads, geometry_.kvLayout,
                                              std::span(histories).first(lanes))};
+  step.tree = tree;
   if (geometry_.ffnKind == QwenFfnKind::SparseMoe) step.moe = operators_.moeDecode(geometry_.moeShape(), lanes);
   std::visit([&](const auto *weights) {
     for (uint32_t index = 0; index < geometry_.layers; ++index) {
@@ -413,15 +416,18 @@ metal::MetalBuffer QwenTarget::addVerifyMixer(VerifyStep &step, const QwenGdnWei
              mixer.inputProjection, inputPlan);
   const ops::LinearPlan outputPlan =
       linear.decodePlan(mixer.outputProjection, step.lanes, ops::LinearEpilogue::Residual);
-  const ops::PreparedInput hidden = ops::GDN::addDecode(
-      step.graph,
-      {b.gdnPacked[layer], mixer.convolutionWeights, b.currentGdnStates, b.nextGdnStates, b.gdnMixed[layer],
-       mixer.decay, mixer.timeBias, b.gdnDecay[layer], b.gdnBeta[layer], mixer.mixerNorm, b.gdnHidden,
-       b.linearScratch},
-      geometry_.gdnShape(), step.lanes, layer,
-      {geometry_.stateLayout.convolutionLayerBytes(), geometry_.stateLayout.recurrentLayerBytes(),
-       geometry_.stateLayout.convolutionBytes()},
-      mixer.outputHeadOrder, outputPlan.input());
+  const ops::GdnDecodeBuffers gdnBuffers{
+      b.gdnPacked[layer], mixer.convolutionWeights, b.currentGdnStates, b.nextGdnStates, b.gdnMixed[layer],
+      mixer.decay, mixer.timeBias, b.gdnDecay[layer], b.gdnBeta[layer], mixer.mixerNorm, b.gdnHidden,
+      b.linearScratch};
+  const ops::GdnStateStrides gdnStrides{geometry_.stateLayout.convolutionLayerBytes(),
+                                        geometry_.stateLayout.recurrentLayerBytes(),
+                                        geometry_.stateLayout.convolutionBytes()};
+  const ops::PreparedInput hidden =
+      step.tree ? ops::GDN::addDecodeTree(step.graph, gdnBuffers, geometry_.gdnShape(), step.lanes, layer,
+                                          gdnStrides, mixer.outputHeadOrder, outputPlan.input(), *step.tree)
+                : ops::GDN::addDecode(step.graph, gdnBuffers, geometry_.gdnShape(), step.lanes, layer,
+                                      gdnStrides, mixer.outputHeadOrder, outputPlan.input());
   linear.add(step.graph,
              {.input = b.gdnHidden, .output = b.gdnOutput, .residual = input, .scratch = b.linearScratch,
               .prepared = hidden},
@@ -443,10 +449,15 @@ metal::MetalBuffer QwenTarget::addVerifyMixer(VerifyStep &step, const QwenAttent
   ops::PagedAttention::addVerifyProjection(step.graph, b.fullPacked, mixer.queryNorm, mixer.keyNorm, b.ropeCos,
                                            b.ropeSin, b.fullQueries, b.chunkKeys[layer], b.chunkValues[layer],
                                            geometry_.attentionQueryHeads, geometry_.kvLayout, step.lanes);
-  ops::PagedAttention::addVerify(step.graph, step.kvLayers[layer],
-                                 {b.chunkKeys[layer], b.chunkValues[layer], b.fullQueries, b.attentionPartials,
-                                  b.attentionStatistics, b.fullAttention, b.pageTables},
-                                 step.chunks, step.attention);
+  const ops::PagedVerifyBuffers attentionBuffers{b.chunkKeys[layer], b.chunkValues[layer], b.fullQueries,
+                                                 b.attentionPartials, b.attentionStatistics, b.fullAttention,
+                                                 b.pageTables};
+  if (step.tree)
+    ops::PagedAttention::addVerifyTree(step.graph, step.kvLayers[layer], attentionBuffers, step.chunks,
+                                       step.attention, *step.tree);
+  else
+    ops::PagedAttention::addVerify(step.graph, step.kvLayers[layer], attentionBuffers, step.chunks,
+                                   step.attention);
   const ops::LinearPlan outputPlan =
       linear.decodePlan(mixer.outputProjection, step.lanes, ops::LinearEpilogue::Residual);
   const ops::PreparedInput hidden = ops::PagedAttention::addVerifyGate(
@@ -524,9 +535,26 @@ void QwenTarget::addEmbedding(metal::CommandGraph &graph,
                       rows);
 }
 
+void QwenTarget::addVerifyStore(
+    metal::CommandGraph &graph, const QwenTargetVerifyBuffers &buffers,
+    std::span<const JustFitKvLayer> kvLayers,
+    std::span<const kv::ChunkedPrefillParams> chunks, uint32_t lanes) const {
+  std::array<uint32_t, ExecutionLimits::maximumBatchWidth> histories{};
+  for (uint32_t lane = 0; lane < lanes; ++lane)
+    histories[lane] = chunks[lane].committed_tokens;
+  const ops::VerifyAttentionPlan plan = operators_.verifyAttention(
+      lanes, geometry_.attentionQueryHeads, geometry_.kvLayout, std::span(histories).first(lanes));
+  for (uint32_t layer = 0; layer < geometry_.kvLayout.attentionLayers; ++layer)
+    ops::PagedAttention::addVerifyStore(graph, kvLayers[layer],
+                                        {buffers.chunkKeys[layer], buffers.chunkValues[layer], buffers.fullQueries,
+                                         buffers.attentionPartials, buffers.attentionStatistics,
+                                         buffers.fullAttention, buffers.pageTables},
+                                        chunks, plan);
+}
+
 void QwenTarget::addStateCommit(metal::CommandGraph &graph,
                                 QwenTargetCommitBuffers buffers,
-                                uint32_t lanes) const {
+                                uint32_t lanes, bool tree) const {
   if (!lanes || lanes > ExecutionLimits::maximumBatchWidth)
     throw std::invalid_argument("invalid Qwen state commit batch");
   ops::GDN::addCommit(
@@ -537,7 +565,7 @@ void QwenTarget::addStateCommit(metal::CommandGraph &graph,
       geometry_.gdnShape(), geometry_.stateLayout.layers, lanes,
       {geometry_.stateLayout.convolutionLayerBytes(),
        geometry_.stateLayout.recurrentLayerBytes(),
-       geometry_.stateLayout.convolutionBytes()});
+       geometry_.stateLayout.convolutionBytes()}, tree);
 }
 
 } // namespace justfit::model

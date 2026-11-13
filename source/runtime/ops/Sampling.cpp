@@ -150,16 +150,23 @@ void Sampling::addVerify(metal::CommandGraph &graph,
                          std::span<const SamplingPolicy> policies,
                          SamplingBuffers buffers, uint32_t stopToken0,
                          uint32_t stopToken1,
-                         const PenaltyTable &penalties) const {
+                         const PenaltyTable &penalties, bool tree) const {
   if (policies.empty() || policies.size() > kMaximumLanes)
     throw std::invalid_argument("invalid sampling batch width");
   // Verify row r of a lane reads mask row r + 1 and, below the last row,
   // follows draft token r; every row draws with the lane's correction
-  // uniform.
-  const TargetSamplingParams params =
+  // uniform. A sampled tree's rows below seven follow the draft's chain and
+  // each row draws its own uniform.
+  TargetSamplingParams params =
       selection(policies, buffers,
-                {activeVerifyRows(), 0, 1, JUSTFIT_UNIFORM_CORRECTION, (activeVerifyRows()-1)},
+                {activeVerifyRows(), 0, 1, JUSTFIT_UNIFORM_CORRECTION,
+                 tree ? JUSTFIT_DRAFT_PROPOSAL_TOKENS : (activeVerifyRows()-1)},
                 stopToken0, stopToken1);
+  if (tree) {
+    params.row_uniforms = 1;
+    requireBytes(buffers.uniforms, (policies.size() * JUSTFIT_SAMPLING_UNIFORMS) * sizeof(float),
+                 "tree sampling uniform");
+  }
   addPenalties(graph, policies, buffers, penalties, 0, true);
   addSelection(graph, params, static_cast<uint32_t>(policies.size()), buffers);
 }

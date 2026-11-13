@@ -271,8 +271,8 @@ struct BatchItem final {
 
 struct BatchPlan final {
   WorkKind kind = WorkKind::Decode;
-  // A decode's lanes exchange token masks with the host; constrained and
-  // unconstrained lanes never share a command.
+  // True when any lane exchanges token masks with the host.
+  // The scheduler bounds mixing; initial mask selection remains homogeneous.
   bool constrained = false;
   std::vector<BatchItem> items;
   DecodeStage decodeStage = DecodeStage::Regular;
@@ -343,6 +343,8 @@ struct ModelStepResult final {
 struct ModelMaskRequest final {
   uint64_t requestId = 0;
   std::vector<uint32_t> simulationTokens;
+  // Experiment (JUSTFIT_TREE): a draft tree's row parents; empty for a chain.
+  std::vector<uint32_t> simulationParents;
 };
 
 class ModelBatchTicket {
@@ -579,6 +581,18 @@ public:
   [[nodiscard]] virtual bool canOverlapExternalVision() { return false; }
   virtual void endExternalVision() noexcept {}
   virtual void end(uint64_t requestId) = 0;
+  // Ends the request but keeps the state its lane holds where it stopped, as
+  // a RAM state at its committed length that a later request extending its
+  // tokens restores (beginRestore). No state when the model keeps none; the
+  // request has then ended as by end().
+  struct Parked final {
+    std::shared_ptr<const CompositeState> state;
+    uint32_t tokens = 0;
+  };
+  [[nodiscard]] virtual Parked park(uint64_t requestId) {
+    end(requestId);
+    return {};
+  }
 };
 
 // Adds startup warmup and observability to the model interface.

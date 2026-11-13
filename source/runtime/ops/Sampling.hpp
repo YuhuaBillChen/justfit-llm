@@ -151,10 +151,13 @@ public:
                   SamplingBuffers buffers, uint32_t rowOffset,
                   uint32_t stopToken0, uint32_t stopToken1,
                   const PenaltyTable &penalties) const;
+  // tree: a sampled draft tree's rows (rows below seven follow the draft's
+  // chain; each row draws its own uniform, metal/abi/Sampling.h).
   void addVerify(metal::CommandGraph &graph,
                  std::span<const SamplingPolicy> policies,
                  SamplingBuffers buffers, uint32_t stopToken0,
-                 uint32_t stopToken1, const PenaltyTable &penalties) const;
+                 uint32_t stopToken1, const PenaltyTable &penalties,
+                 bool tree = false) const;
   void addAcceptance(
       metal::CommandGraph &graph, AcceptanceBuffers buffers,
       std::span<const uint32_t> maximumRetained,

@@ -35,7 +35,7 @@ bool older(const std::optional<CacheEvictionCandidate> &left,
 Cache::Cache(KvPool &pool, KvTier *kvTier,
              std::shared_ptr<const model::DiskBudget> diskBudget)
     : pool_(pool), tier_(kvTier), persistent_(kvTier && kvTier->persistent()),
-      diskBudget_(std::move(diskBudget)), kv_(pool, recency_),
+      diskBudget_(std::move(diskBudget)), kv_(pool, recency_, persistent_),
       states_(kv_, recency_, [this](bool inUse) { return freeDiskSpace(inUse); }, persistent_) {}
 
 CacheAdoption Cache::adopt(std::vector<PersistedKv> blocks, std::vector<PersistedState> states) {
@@ -149,6 +149,31 @@ void Cache::beginRequest(uint64_t requestId) {
   auto [_, inserted] = requests_.emplace(requestId, Request{});
   if (!inserted)
     throw std::invalid_argument("duplicate request id");
+}
+
+void Cache::parkRequest(uint64_t requestId, uint64_t parkId, uint32_t tokens) {
+  auto found = requests_.find(requestId);
+  if (found == requests_.end() || found->second.pendingRestores || requests_.contains(parkId))
+    throw std::logic_error("request cannot be parked");
+  Request kept = std::move(found->second);
+  requests_.erase(found);
+  // Pages past the stop held speculative scratch rows only.
+  const size_t pages = (size_t{tokens} + KvCache::pageTokens - 1) / KvCache::pageTokens;
+  while (kept.pages.size() > pages) {
+    pool_.releasePage(kept.pages.back(), false);
+    kept.pages.pop_back();
+  }
+  requests_.emplace(parkId, std::move(kept));
+}
+
+void Cache::adoptParked(uint64_t parkId, uint64_t requestId) {
+  auto found = requests_.find(parkId);
+  if (found == requests_.end() || !requestId || requests_.contains(requestId))
+    throw std::logic_error("parked request cannot be adopted");
+  Request adopted = std::move(found->second);
+  requests_.erase(found);
+  pagesChanged(adopted, 0);
+  requests_.emplace(requestId, std::move(adopted));
 }
 
 void Cache::endRequest(uint64_t requestId) {
@@ -387,7 +412,8 @@ bool Cache::retireCheckpointState(StateCheckpoint checkpoint) noexcept {
 // the governor admits one. Making room is the caller's reclaim; a page that
 // must be written first comes back when its copy lands.
 
-TokenAdmission Cache::ensureTokens(uint64_t requestId, uint64_t tokenCount) {
+TokenAdmission Cache::ensureTokens(uint64_t requestId, uint64_t tokenCount,
+                                   uint64_t writtenTokens) {
   Request &active = request(requestId);
   const uint64_t needed64 =
       (tokenCount + KvCache::pageTokens - 1) / KvCache::pageTokens;
@@ -401,6 +427,10 @@ TokenAdmission Cache::ensureTokens(uint64_t requestId, uint64_t tokenCount) {
   if (const TokenAdmission admission = admitPages(needed - previousSize, acquired);
       !admission.granted())
     return admission;
+  const uint64_t written = std::min(writtenTokens, tokenCount);
+  for (uint32_t index = 0; index < acquired.size(); ++index)
+    if (uint64_t{previousSize + index + 1} * KvCache::pageTokens > written)
+      pool_.clearPage(acquired[index]);
   active.pages.insert(active.pages.end(), acquired.begin(), acquired.end());
   pagesChanged(active, previousSize);
   return {};
@@ -1126,7 +1156,8 @@ CacheSnapshot Cache::snapshot() const {
           static_cast<uint32_t>(requests_.size()),
           extentCompactMaxMilliseconds_,
           persistent_,
-          adoption_};
+          adoption_,
+          kv_.residency()};
 }
 
 Cache::Request &Cache::request(uint64_t requestId) {

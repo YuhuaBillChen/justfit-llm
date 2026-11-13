@@ -316,6 +316,7 @@ bool NativeRuntime::handleExternalMemory(const protocol::ExternalMemoryFrame &co
     if (pendingExternal_ && pendingExternal_->leaseId == control.leaseId) {
       auto cancelled = *pendingExternal_;
       pendingExternal_.reset();
+      pendingExternalWaitsForSafePoint_ = false;
       cancelledPending = true;
       if (!replyExternalMemory(cancelled, false)) return false;
     }
@@ -335,6 +336,7 @@ bool NativeRuntime::handleExternalMemory(const protocol::ExternalMemoryFrame &co
   if (!ready_ || !config_.externalMemoryControl || pendingExternal_)
     return replyExternalMemory(control, false);
   pendingExternal_ = control;
+  pendingExternalWaitsForSafePoint_ = false;
   if (visionScheduling_) core_.setExternalVisionPending(true);
   // receive() can run while GPU work is outstanding. In that case tick()
   // answers at the next completion, or release cancels the pending acquire.
@@ -345,12 +347,22 @@ bool NativeRuntime::handleExternalMemory(const protocol::ExternalMemoryFrame &co
 bool NativeRuntime::processExternalMemory() {
   if (!pendingExternal_) return false;
   const bool outstanding = core_.commandInFlight();
-  if (outstanding && (!config_.externalMemoryCanOverlap ||
+  if (outstanding && (pendingExternalWaitsForSafePoint_ || !config_.externalMemoryCanOverlap ||
                       !config_.externalMemoryCanOverlap())) return false;
   auto control = *pendingExternal_;
-  pendingExternal_.reset();
   const bool granted = config_.externalMemoryControl &&
       config_.externalMemoryControl(control.leaseId, control.bytes);
+  // A failed fast-path reservation could fit after the command drains and
+  // prepareExternalVisionMemory releases unused lane buffers. Keep this
+  // acquire pending for that safe point instead of repeatedly answering no
+  // while every retry arrives inside another prefill command. Cancellation
+  // still removes it through handleExternalMemory's zero-byte control.
+  if (!granted && outstanding) {
+    pendingExternalWaitsForSafePoint_ = true;
+    return false;
+  }
+  pendingExternal_.reset();
+  pendingExternalWaitsForSafePoint_ = false;
   if (visionScheduling_ || (std::getenv("JUSTFIT_ANE_VISION_FAST_ADMISSION") &&
       std::string_view(std::getenv("JUSTFIT_ANE_VISION_FAST_ADMISSION")) == "1"))
     logLine("JUSTFIT_ANE_VISION_ADMISSION gpu_ticket_outstanding=", outstanding,
@@ -533,7 +545,30 @@ void NativeRuntime::maskRequested(uint64_t requestId,
   pendingMasks_.emplace(requestId, PendingMask{maskRequestId, expectedWords});
   send(protocol::MaskRequestEvent{
       requestId, maskRequestId, wordsPerToken,
-      std::vector<uint32_t>(simulationTokens.begin(), simulationTokens.end())});
+      std::vector<uint32_t>(simulationTokens.begin(), simulationTokens.end()), {}});
+}
+
+void NativeRuntime::maskTreeRequested(uint64_t requestId, std::span<const uint32_t> tokens,
+                                      std::span<const uint32_t> parents) {
+  // maskRequested with the rows' parents: a mask before the anchor and one
+  // after each row's path, as many rows as a chain of the same length.
+  if (pendingMasks_.contains(requestId)) {
+    throw std::logic_error("request already has a pending token mask");
+  }
+  uint64_t maskRequestId = nextMaskRequestId_++;
+  if (!maskRequestId)
+    maskRequestId = nextMaskRequestId_++;
+  const uint32_t wordsPerToken =
+      model::maskWordsPerToken(config_.engine.vocabularySize);
+  const uint64_t expectedWords = uint64_t(wordsPerToken) * (uint64_t(tokens.size()) + 1);
+  if (!expectedWords || expectedWords > limits_.maxMaskWords) {
+    throw std::length_error("token mask dimensions exceed wire limits");
+  }
+  pendingMasks_.emplace(requestId, PendingMask{maskRequestId, expectedWords});
+  send(protocol::MaskRequestEvent{
+      requestId, maskRequestId, wordsPerToken,
+      std::vector<uint32_t>(tokens.begin(), tokens.end()),
+      std::vector<uint32_t>(parents.begin(), parents.end())});
 }
 
 void NativeRuntime::completed(uint64_t requestId, EngineFinishReason reason,

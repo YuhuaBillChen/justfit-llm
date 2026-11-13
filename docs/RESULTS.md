@@ -14,14 +14,19 @@ PP is input tokens divided by client TTFT. TG uses the 511 inter-token intervals
 | M4 Pro | JustFit v1 | 120.9 | 19.4 |
 | M4 Pro | Splash 1.3.0 | 128.6 | 51.0 |
 | M4 Pro | JustFit v2 | 140.4 | 46.5 |
+| M4 Pro | JustFit 2.6.0 | 133.9 (−4.6%) | 48.3 (+3.8%) |
 | M5 Pro | mlx-vlm (historical) | 345.6 | 14.5 |
 | M5 Pro | JustFit v1 | 338.2 | 22.5 |
 | M5 Pro | Splash 1.3.0 | 403.7 | 57.6 |
 | M5 Pro | JustFit v2 | 479.6 | 55.5 |
+| M5 Pro | JustFit 2.6.0 | 511.5 (+6.7%) | 59.5 (+7.3%) |
 | M6 | mlx-vlm (historical) | 277.1 | 8.2 |
 | M6 | JustFit v1 | 273.5 | 18.1 |
 | M6 | Splash 1.3.0 | 307.2 | 36.9 |
 | M6 | JustFit v2 | 449.1 | 36.1 |
+| M6 | JustFit 2.6.0 | 457.5 (+1.9%) | 38.5 (+6.6%) |
+
+JustFit 2.6.0 rows use the same eight tasks and settings with draft trees on (shipped presets), two repeats each, on macOS 27.2.1 with the `mlx-community/Qwen3.8-27B-4bit` checkpoint and a 22,015 MiB budget; percentages are against the v2 row of the same device. The M4 Pro 2.6.0 run had a browser open.
 
 The displayed v2 cohort is refreshed against the preceding runtime using alternating paired tasks: 24 paired outputs agree across the three devices and median PP/TG changes are within 1%. These speed checks use a 21,631 MiB native allocation setting. A one-prompt check at 22,015 MiB is not a replacement speed distribution. M4 Pro's upstream Splash arm uses a 1 GiB host reserve after startup failures at the original default; M5 Pro/M6 retain 2 GiB upstream reserves. Early trials partly overlapped dependency/asset preparation. These are not controlled background-I/O or single-factor ablations.
 

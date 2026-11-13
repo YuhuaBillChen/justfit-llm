@@ -434,8 +434,8 @@ void validateDraftConfig(NSDictionary *draft, const DFlashDraftLayout &layout,
       ![architectures[0] isEqual:@"DFlash2DraftModel"])
     throw std::invalid_argument("draft is not a DFlash2 model");
   requireNumbers(draft, "checkpoint", "draft config",
-                 {{"num_hidden_layers", layout.layers},
-                  {"hidden_size", layout.hiddenSize},
+                 {{"hidden_size", layout.hiddenSize},
+                  {"num_hidden_layers", layout.layers},
                   {"vocab_size", layout.vocabularySize},
                   {"intermediate_size", layout.intermediateSize},
                   {"num_attention_heads",

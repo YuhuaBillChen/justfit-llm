@@ -1,0 +1,11 @@
+[package]
+name = "justfit-ane-worker"
+version = "2.5.0-dev.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.10.9"
+half = "=2.7.1"

@@ -1,7 +1,19 @@
 // Modified for JustFit: product identity and integration.
 #include "metal/abi/Gguf.h"
+#include "metal/abi/Embedding.h"
 #include "metal/abi/KernelABI.h"
 #include "metal/kernels/common/gguf_embedding_formats.h"
+
+kernel void draft_mask_rows(
+    device const bfloat *mask [[buffer(0)]],
+    device bfloat *rows [[buffer(1)]],
+    constant DraftMaskRowsParams &params [[buffer(2)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_index_in_threadgroup]]) {
+  const uint column = group.x * 256 + thread_index;
+  if (column >= params.width) return;
+  rows[(ulong(group.z) * JUSTFIT_TARGET_VERIFY_ROWS + 1 + group.y) * params.width + column] = mask[column];
+}
 
 template <uint Hidden>
 inline void q4_embedding_impl(device const uint *tokens,

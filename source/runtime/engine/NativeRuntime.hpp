@@ -146,6 +146,7 @@ private:
   bool processExternalMemory();
   bool replyExternalMemory(const protocol::ExternalMemoryFrame &control, bool granted);
   std::optional<protocol::ExternalMemoryFrame> pendingExternal_;
+  bool pendingExternalWaitsForSafePoint_ = false;
   bool handleMaskIssue(protocol::ProtocolIssue issue);
   bool handleIssue(protocol::ProtocolIssue issue);
   void requestError(uint64_t requestId, std::string code, std::string message,
@@ -164,6 +165,8 @@ private:
                       double cycleMilliseconds) override;
   void promptProgress(uint64_t requestId, uint32_t processedTokens) override;
   void tokens(uint64_t requestId, std::span<const uint32_t> values) override;
+  void maskTreeRequested(uint64_t requestId, std::span<const uint32_t> tokens,
+                         std::span<const uint32_t> parents) override;
   void maskRequested(uint64_t requestId,
                      std::span<const uint32_t> simulationTokens) override;
   void completed(uint64_t requestId, EngineFinishReason reason,

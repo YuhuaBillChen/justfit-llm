@@ -481,6 +481,9 @@ public:
     if (tensor == DecodeTensor::VerifyProposals) return (ops::activeVerifyRows()-1)*sizeof(uint32_t);
     if (tensor == DecodeTensor::VerifyCandidates || tensor == DecodeTensor::VerifyProbabilities)
       return (ops::activeVerifyRows()-1)*JUSTFIT_DRAFT_CANDIDATES*sizeof(uint32_t);
+    // A lane's masks: before its anchor and after each verify row (16-row
+    // tree lanes take the next lanes' rows, as the row tensors do).
+    if (tensor == DecodeTensor::ConstraintMasks) return bytes/9*(ops::activeVerifyRows()+1);
     return targetRowTensor(tensor) ? bytes/8*ops::activeVerifyRows() : bytes;
   }
   [[nodiscard]] metal::MetalBuffer get(uint32_t lane, DecodeTensor tensor) const {

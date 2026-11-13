@@ -190,8 +190,12 @@ MemoryGovernor::tryReserve(uint64_t bytes, metal::AllocationFailure &failure) {
   // so the paced reclaim frees toward the recovery margin for it.
   if (engineFits && !serving_ && !hostRoomFits)
     host_.constrained = true;
+  // A request in service skips the margins but never takes the host's
+  // reserve: the GPU memory it would take is wired, which macOS neither
+  // reclaims nor reports as pressure, so the system would stall short of it.
   const bool hostRefuses = pressure == MemoryPressure::Critical ||
-                           (!serving_ && (!hostRoomFits || host_.held()));
+                           (serving_ ? requested > hostRoom
+                                     : (!hostRoomFits || host_.held()));
   if (hostRefuses || !engineFits) {
     // The host's refusal lifts with its pressure, the limit's only once
     // memory is freed: a refusal they share is the host's.
@@ -274,7 +278,17 @@ MemoryGovernor::snapshot(const std::optional<uint64_t> &hostAvailable,
       hostHeadroom,
       systemPressure_,
       hostGrowthAllowed,
+      hostRecoveryTarget(),
   };
+}
+
+uint64_t MemoryGovernor::hostRecoveryTarget() const noexcept {
+  if (std::chrono::steady_clock::now() >= externalDemandUntil_)
+    return kHostRecoveryMarginBytes;
+  const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+  const uint64_t demand = externalDemandBytes_ > maximum - kHostWarningMarginBytes
+                              ? maximum : externalDemandBytes_ + kHostWarningMarginBytes;
+  return std::max(kHostRecoveryMarginBytes, demand);
 }
 
 MemoryGovernor::HostState MemoryGovernor::hostState(
@@ -284,7 +298,8 @@ MemoryGovernor::HostState MemoryGovernor::hostState(
   HostState next;
   next.constrained = !hostAvailable ||
       hostHeadroom < kHostWarningMarginBytes ||
-      (host_.constrained && hostHeadroom < kHostRecoveryMarginBytes);
+      (hostRecoveryTarget() > kHostRecoveryMarginBytes && hostHeadroom < hostRecoveryTarget()) ||
+      (host_.constrained && hostHeadroom < hostRecoveryTarget());
   next.reclaimExhausted = host_.reclaimExhausted && next.constrained;
   return next;
 }
@@ -330,15 +345,17 @@ std::optional<MemoryReclaimDirective> MemoryPressurePolicy::update(
       snapshot.systemPressure == MemoryPressure::Normal)
     return MemoryReclaimDirective{};
 
-  uint64_t desired = snapshot.hostHeadroomBytes < kHostRecoveryMarginBytes
-      ? kHostRecoveryMarginBytes - snapshot.hostHeadroomBytes
+  uint64_t desired = snapshot.hostHeadroomBytes < snapshot.hostRecoveryTargetBytes
+      ? snapshot.hostRecoveryTargetBytes - snapshot.hostHeadroomBytes
       : 0;
   // Recovering the last stretch to the watermark is worth far less than the
   // resume point it would otherwise discard, so a pass with nothing waiting
   // keeps that publication and takes the rest. A waiting request outranks it.
   return MemoryReclaimDirective{
       .targetBytes = std::min(desired, kHostWarningMarginBytes),
-      .keepResumePoint = !requestWaiting};
+      .keepResumePoint = !requestWaiting,
+      .upTo = requestWaiting || snapshot.systemPressure == MemoryPressure::Warning
+                  ? ReclaimClass::InUse : ReclaimClass::Ordinary};
 }
 
 void MemoryPressurePolicy::reclaimed(const MemoryReclaimDirective &directive,

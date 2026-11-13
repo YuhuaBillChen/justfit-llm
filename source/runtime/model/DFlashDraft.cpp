@@ -1,6 +1,7 @@
 // Modified for JustFit: product identity and integration.
 #include "ops/VerifyShape.hpp"
 #include "DFlashDraft.hpp"
+#include "ops/Embedding.hpp"
 #include "Checked.hpp"
 #include "DraftCheckpoint.hpp"
 #include "metal/abi/DraftAttention.h"
@@ -358,6 +359,8 @@ DFlashDraftWeights readDraft(metal::MetalBackend &backend, Files &files,
         file.section(codebookBytes, "predecessor-codebook");
     result.successorCodebook =
         file.section(codebookBytes, "successor-codebook");
+    if (files.hasMaskEmbedding())
+      result.maskEmbedding = file.section(uint64_t{layout.hiddenSize} * kBFloat16Bytes, "mask-embedding");
     file.finish();
     result.files.push_back(file.record());
   }
@@ -373,6 +376,11 @@ WeightFile PackageDraftFiles::layer(uint32_t index) const {
   const std::string filename = "layer-" + std::to_string(index) + ".bin";
   return images.load(packageImage(directory / filename, "draft/" + filename,
                                   kDFlashLayerMagic, index, 0));
+}
+
+void DFlashDraft::addMaskRows(metal::CommandGraph &graph, metal::MetalBuffer rows, uint32_t lanes) const {
+  if (weights_.maskEmbedding)
+    ops::Embedding::addDraftMaskRows(graph, weights_.maskEmbedding, std::move(rows), weights_.layout.hiddenSize, lanes);
 }
 
 WeightFile PackageDraftFiles::model() const {

@@ -1,0 +1,36 @@
+[package]
+name = "justfit-rust-frontend"
+version = "2.6.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = "=0.8.9"
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"] }
+tokio-stream = "=0.1.19"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order", "arbitrary_precision", "unbounded_depth"] }
+tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"] }
+minijinja = { version = "=3.0.4", features = ["json", "serde", "loop_controls", "fuel", "preserve_order", "unstable_machinery"] }
+minijinja-contrib = { version = "=3.0.4", features = ["pycompat"] }
+subtle = "=2.6.1"
+sha2 = "=0.10.9"
+ring = "=0.17.14"
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "platform-verifier"] }
+zip = { version = "=9.2.1", default-features = false, features = ["deflate-flate2"] }
+percent-encoding = "2"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+base64 = "=0.22.1"
+turbojpeg = { version = "=1.5.1", default-features = false, features = ["cmake"] }
+half = "=2.7.1"
+llguidance = "=1.8.0"
+toktrie_hf_tokenizers = "=1.8.0"
+toktrie = "=1.8.0"
+jsonschema = { version = "=0.29.1", default-features = false }
+fernet = { version = "=0.2.2", default-features = false, features = ["rustcrypto", "fernet_danger_timestamps"] }
+libc = "=0.2.191"
+justfit-native-client-prototype = { path = "../native-client" }
+
+[[bin]]
+name = "justfit-rs"
+path = "src/main.rs"

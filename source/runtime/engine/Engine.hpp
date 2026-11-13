@@ -9,6 +9,7 @@
 #include "engine/WriteBehind.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <string_view>
@@ -26,6 +27,11 @@ inline constexpr uint32_t kPrefillCheckpointTokens =
 static_assert(kPrefillCheckpointTokens >= model::ExecutionLimits::draftContextTokens &&
                   kPrefillCheckpointTokens % KvCache::pageTokens == 0,
               "a prefill checkpoint interval spans a draft window and whole KV pages");
+// With checkpoints in RAM only, a prefill checkpoint refused a RAM pair is
+// written out as the lane's recovery point, so they come four times as far
+// apart: at most 196 MiB of writes per 16K prompt tokens under pressure, and
+// at most this much prompt to replay after a suspension.
+inline constexpr uint32_t kRamOnlyPrefillCheckpointTokens = 4 * kPrefillCheckpointTokens;
 // How long a request waits for memory before it fails, and a resident
 // drain lasts, by default.
 inline constexpr double kResourceWaitTimeoutMilliseconds = 30000.0;
@@ -36,6 +42,17 @@ inline constexpr double kResourceWaitTimeoutMilliseconds = 30000.0;
 struct EngineConfig final {
   uint32_t maxContext = 0;
   uint32_t decodeStateIntervalTokens = 0;
+  // 2.6 experiment (JUSTFIT_CHECKPOINT_RAM_ONLY=1): a disposable checkpoint,
+  // rolling decode or prefill progress, that finds no RAM is skipped, never
+  // written straight to disk, and a reclaim drops one unwritten. A decode
+  // lane keeps its previous point.
+  bool checkpointRamOnly = false;
+  // 2.6 step 2 (JUSTFIT_PARKED=1): a request that finishes keeps its lane's
+  // exact state and pages for a later request that extends its tokens, up
+  // to parkedBytes of states (JUSTFIT_PARKED_BYTES) and kMaximumParked of
+  // them; reclaim gives them up before anything else.
+  bool parked = false;
+  uint64_t parkedBytes = uint64_t{600} << 20;
   uint32_t vocabularySize = 0;
   // Patches per image the server's --max-image-pixels allows; zero rejects
   // images.
@@ -118,6 +135,16 @@ struct EngineSnapshot final {
   uint64_t junctionMaterializationFailures = 0;
   uint64_t checkpointPublications = 0;
   uint64_t decodeStatePublications = 0, decodeStatePublicationFailures = 0, decodeStatePromotions = 0;
+  // Where each published decode checkpoint landed: an existing copy, a new RAM
+  // snapshot, or a new snapshot written straight to disk.
+  uint64_t decodeStatesReused = 0, decodeStatesInRam = 0, decodeStatesOnDisk = 0;
+  // RAM-only mode: checkpoints skipped for want of RAM, the previous point kept.
+  uint64_t decodeStatesSkipped = 0, prefillCheckpointsSkipped = 0;
+  // Parked finished states: kept, adopted by a later request (and the tokens
+  // that request did not recompute), and given up unadopted.
+  uint64_t parkedStates = 0, parkedAdoptions = 0, parkedAdoptedTokens = 0, parkedDrops = 0;
+  uint32_t parkedEntries = 0;
+  uint64_t parkedResidentBytes = 0;
   uint64_t checkpointPublicationFailures = 0;
   uint64_t resourceSuspensions = 0;
   // Resident lanes suspended for a request of a strictly higher priority.
@@ -125,6 +152,12 @@ struct EngineSnapshot final {
   uint64_t resourceResumptions = 0;
   // All prefill rows after preemption, including an unfinished prompt suffix.
   uint64_t resourceReplayTokens = 0;
+  // Recovery distance, in tokens: how far behind the end a finished request's
+  // next turn resumes (its promoted decode point, else its prompt), and how
+  // far a resumed suspension replays. Totals, maxima and how many exceeded
+  // one decode checkpoint interval's worth (127 tokens).
+  uint64_t finishRecoveryTokens = 0, finishRecoveryMax = 0, finishRecoveryOver127 = 0;
+  uint64_t resumeReplayMax = 0, resumeReplayOver127 = 0;
   // A persistent tier's newest restore points (WriteBehind).
   WriteBehindSnapshot writeBehind;
 };
@@ -245,6 +278,9 @@ private:
     uint32_t promptTokens = 0;
     uint32_t reportedPromptTokens = 0;
     uint32_t replayTokens = 0;
+    // How far the lane had got when it was suspended: a resume replays up
+    // to here, the rest of replayTokens is work it had not yet done.
+    uint32_t suspendedDone = 0;
     // A failed dispatch must fit before replay can consume any model work.
     uint64_t resumeKvTargetTokens = 0;
     ResourceWait resourceWait;
@@ -337,7 +373,9 @@ private:
                                                       const Request &right);
   [[nodiscard]] bool pendingSharedPrefill(const Request &request,
                                           uint32_t resumeBoundary) const;
-  void completeAdmission(Request &request, CacheLookup &lookup, DraftContextPlan draft);
+  // boundary, when given, is where an adopted parked state resumes.
+  void completeAdmission(Request &request, CacheLookup &lookup, DraftContextPlan draft,
+                         std::optional<uint32_t> boundary = std::nullopt);
   [[nodiscard]] bool pollRestores(double nowMilliseconds);
   [[nodiscard]] DraftContextPlan
   configureDraftStatePlan(Request &request, uint32_t stateBoundary,
@@ -491,7 +529,24 @@ private:
   // refused request's own wait limit out on every retry. Nor does a growth
   // suspension (suspendForGrowth), which starts the recovery drain instead.
   void vacateLane(Request &request, bool keepContinuation);
-  void release(Request &request);
+  // A finishing request's release keeps its state when park (parkLane).
+  void release(Request &request, bool park = false);
+  // Ends the request's lane and keeps its exact state and pages as a parked
+  // entry; false, with nothing changed, when it keeps none.
+  [[nodiscard]] bool parkLane(Request &request);
+  // Gives up the oldest parked entry; false when none is left.
+  bool dropOneParked();
+  struct Parked final {
+    uint64_t id = 0;
+    std::vector<uint32_t> tokens;
+    std::vector<ImageSpan> images;
+    std::shared_ptr<const CompositeState> state;
+    uint64_t bytes = 0;
+  };
+  static constexpr size_t kMaximumParked = 4;
+  // Oldest first.
+  std::deque<Parked> parked_;
+  uint64_t nextParkId_ = 0;
   void sweepTerminal();
 
   EngineConfig config_;

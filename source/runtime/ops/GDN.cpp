@@ -2,6 +2,8 @@
 #include "ops/VerifyShape.hpp"
 #include "ops/GDN.hpp"
 
+#include <cstring>
+
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/GDN.h"
 #include "ops/BufferExtent.hpp"
@@ -173,7 +175,7 @@ PreparedInput GDN::addDecode(metal::CommandGraph &graph, GdnDecodeBuffers buffer
 
 void GDN::addCommit(metal::CommandGraph &graph, GdnCommitBuffers buffers,
                     GdnShape shape, uint32_t layers, uint32_t lanes,
-                    GdnStateStrides state) {
+                    GdnStateStrides state, bool tree) {
   if (!layers || !lanes || lanes > JUSTFIT_MAXIMUM_BATCH_WIDTH ||
       !state.valid())
     throw std::invalid_argument("invalid GDN commit geometry");
@@ -198,10 +200,37 @@ void GDN::addCommit(metal::CommandGraph &graph, GdnCommitBuffers buffers,
   const GDNBatchCommitParams params{state.convolutionLayerBytes,
                                     state.recurrentLayerBytes,
                                     state.convolutionStateBytes};
-  graph.add(kernelName(kernel, "verify_gdn_commit",
+  if (tree && shape.valueHeads != 48)
+    throw std::invalid_argument("tree GDN commit supports 48 value heads");
+  graph.add(tree ? "verify_gdn_commit_tree" : kernelName(kernel, "verify_gdn_commit",
                        "verify_gdn_commit_vh32"),
             std::move(bindings), params,
             {shape.valueHeads, layers, lanes});
+}
+
+PreparedInput GDN::addDecodeTree(metal::CommandGraph &graph, GdnDecodeBuffers buffers,
+                                 GdnShape shape, uint32_t lanes, uint32_t layer,
+                                 GdnStateStrides state, GdnHeadOrder order,
+                                 LinearInput input, const JustFitTreeBatch &tree) {
+  // addDecode's checks and bindings, then the tree entry with the trees.
+  metal::CommandGraph probe;
+  addDecode(probe, buffers, shape, lanes, layer, state, order, input);
+  const auto &dispatch = probe.dispatches().front();
+  std::string name = dispatch.pipelineName;
+  if (name.starts_with("wide16::")) name = name.substr(8);  // push() adds it back
+  if (name == "verify_gdn_fused_table64") name = "verify_gdn_fused_tree_table64";
+  else if (name == "verify_gdn_fused") name = "verify_gdn_fused_tree";
+  else throw std::invalid_argument("no tree GDN verify for " + name);
+  if (lanes > 2) throw std::invalid_argument("tree GDN verify takes at most two lanes");
+  GDNTreeDecodeParams params{};
+  std::memcpy(&params.base, dispatch.bytes.front().data, sizeof(params.base));
+  params.tree = tree;
+  std::vector<metal::MetalBuffer> bindings;
+  for (const auto &binding : dispatch.buffers) bindings.push_back(binding.buffer);
+  graph.add(std::move(name), std::move(bindings), params, dispatch.threadgroups,
+            dispatch.threadsPerThreadgroup);
+  if (input == LinearInput::Plain) return {};
+  return {buffers.hidden, input};
 }
 
 } // namespace justfit::ops

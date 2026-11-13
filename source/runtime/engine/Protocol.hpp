@@ -42,6 +42,8 @@ enum class FrameType : uint16_t {
   Start = 0x0101,
   Tokens = 0x0102,
   MaskRequest = 0x0103,
+  // Experiment (JUSTFIT_TREE): a draft tree's mask request.
+  MaskTreeRequest = 0x0109,
   Done = 0x0104,
   Error = 0x0105,
   StatusJson = 0x0107,
@@ -191,6 +193,8 @@ struct RequestFrame {
 //   Tokens         u64 requestId, u32 sequenceOffset, u32 count, u32 tokens
 //   MaskRequest    u64 requestId, u64 maskRequestId, u32 wordsPerMask,
 //                  u32 count, u32 simulation tokens
+//   MaskTreeRequest u64 requestId, u64 maskRequestId, u32 wordsPerMask,
+//                  u32 count, u32 row tokens, u32 row parents
 //   Done           u64 requestId, u8 reason, u32 promptTokens,
 //                  u32 completionTokens, u64 prefillMicros, u64 decodeMicros,
 //                  u64 wallMicros, u32 count, f32 option logits
@@ -261,6 +265,11 @@ struct MaskRequestEvent {
   uint64_t maskRequestId = 0;
   uint32_t wordsPerMask = 0;
   std::vector<uint32_t> simulationTokens;
+  // A draft tree's request (MaskTreeRequest): simulationTokens are its rows,
+  // row 0 the pending anchor, and each row's parent row is smaller than it;
+  // the rows below the before-anchor row describe the state after each row's
+  // path. Empty for a chain.
+  std::vector<uint32_t> simulationParents;
 
   // Rows describe the constraint state before and after each simulated
   // token. Empty input is the initial-anchor request (one row); verification

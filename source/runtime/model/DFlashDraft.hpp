@@ -166,6 +166,7 @@ struct DFlashDraftWeights final {
   ops::Projection selectorProjection;
   metal::MetalBuffer predecessorCodebook;
   metal::MetalBuffer successorCodebook;
+  metal::MetalBuffer maskEmbedding;
   std::vector<WeightFileRecord> files;
   uint64_t actualAllocatedBytes = 0;
 };
@@ -179,6 +180,7 @@ struct PackageDraftFiles final {
   const DFlashDraftLayout &layout;
   [[nodiscard]] WeightFile layer(uint32_t index) const;
   [[nodiscard]] WeightFile model() const;
+  [[nodiscard]] bool hasMaskEmbedding() const noexcept { return false; }
 };
 
 class DraftCheckpointLoader;
@@ -213,6 +215,7 @@ public:
   void addContextCommit(metal::CommandGraph &graph,
                         DFlashContextBuffers buffers,
                         std::span<const uint32_t> startPositions) const;
+  void addMaskRows(metal::CommandGraph &graph, metal::MetalBuffer rows, uint32_t lanes) const;
 
 private:
   const DFlashDraftWeights &weights_;

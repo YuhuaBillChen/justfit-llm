@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.6.0
+
+- Native distribution: `justfit` is a native executable (Rust, C++/Metal,
+  Swift) and nothing at inference time runs Python; `justfit serve` installs
+  the bundled runtime, model, draft and ANE programs on first start.
+- Serves the original `mlx-community/Qwen3.8-27B-4bit` checkpoint with the
+  DFlash2 draft instead of the `incoai/Qwen3.8-27B-Splash` model pack.
+- Draft-tree decode (greedy on all presets, sampled on M5 Pro and M6).
+- A request in service never takes the host's memory reserve; decode
+  checkpoints stay in memory; multi-turn requests reuse the previous turn's
+  exact state.
+- `return_token_ids`, crash-request quarantine and a self-applied sandbox for
+  the engine and native workers.
+- ANE vision programs download per chip from a pinned Hugging Face index.
+- See [the release notes](.github/release-notes-2.6.0.md) for measurements and
+  known limits.
+
 ## 2.3.1
 
 - Fix long-context image requests that could not be admitted: an image's vision

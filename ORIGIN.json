@@ -1,6 +1,6 @@
 {
   "project": "JustFit",
-  "project_version": "2.3.1",
+  "project_version": "2.6.0",
   "upstream_project": "Splash",
   "upstream_version": "1.3.0",
   "upstream_commit": "0d5a035ea26d1cc566e3c7ee4e08e5e06fa68cf7",
@@ -8,7 +8,12 @@
   "attribution": [
     "LICENSE",
     "NOTICE",
-    "source/THIRD_PARTY_NOTICES"
+    "source/THIRD_PARTY_NOTICES",
+    "THIRD_PARTY_LICENSES.txt",
+    "config/licenses/pdfium-158.0.8125.0.txt",
+    "rust/frontend/SEMIF_LICENSE.txt"
   ],
-  "optional_integrations": "service/broker-integration contains version-specific external adapter patches, not a standalone broker."
+  "optional_integrations": "External production broker/management adapters are deployed separately and are not part of the Python-free native product.",
+  "base_justfit_version": "2.3.1",
+  "upstream_scope": "Inherited Splash ancestry with selectively adopted later engine components; this is not a wholesale upstream application sync."
 }

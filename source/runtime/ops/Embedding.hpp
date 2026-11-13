@@ -22,6 +22,8 @@ public:
                              metal::MetalBuffer proposedTokens,
                              metal::MetalBuffer verifyInputTokens,
                              uint32_t vocabulary, uint32_t lanes);
+  static void addDraftMaskRows(metal::CommandGraph &graph, metal::MetalBuffer mask,
+                               metal::MetalBuffer rows, uint32_t width, uint32_t lanes);
 };
 
 } // namespace justfit::ops

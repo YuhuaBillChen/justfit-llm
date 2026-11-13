@@ -1,0 +1,9 @@
+[package]
+name = "justfit-native-client-prototype"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "justfit-native-rs"
+path = "src/main.rs"

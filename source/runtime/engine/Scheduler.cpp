@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace justfit::engine {
@@ -302,6 +303,14 @@ uint32_t Scheduler::dispatchRemaining(const PrefillRequestView &view) noexcept {
   uint32_t end = view.request->spec.prefillTokens;
   if (view.request->prefillBoundary)
     end = std::min(end, *view.request->prefillBoundary);
+  // 2.6 test hook (JUSTFIT_TEST_PREFILL_SPLIT=N): a prefill crossing token N
+  // ends its command there, so the next one starts at N, aligned or not.
+  static const uint32_t split = [] {
+    const char *value = std::getenv("JUSTFIT_TEST_PREFILL_SPLIT");
+    return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+  }();
+  if (split > view.promptProcessed && split < end)
+    end = split;
   return end - view.promptProcessed;
 }
 
@@ -421,13 +430,23 @@ std::optional<BatchPlan> Scheduler::nextDecode(std::span<const uint64_t> exclude
   const RequestPriority selectedPriority = ready.front()->spec.priority;
   BatchPlan plan;
   plan.kind = WorkKind::Decode;
-  plan.constrained = ready.front()->spec.constrained;
+  const uint32_t compatible = static_cast<uint32_t>(std::count_if(
+      ready.begin(), ready.end(), [&](const Request *request) {
+        return request->spec.priority == selectedPriority && request->decodeStage == decodeStage;
+      }));
+  // Only the qualified two-lane policy is enabled by the M4 profile.
+  // Wider mixtures retain the homogeneous schedule until separately qualified.
+  const char *configured = std::getenv("JUSTFIT_MIXED_DECODE_MAX_LANES");
+  const uint32_t mixedLimit = configured && std::string_view(configured) == "2" ? 2 : 0;
+  const bool mix = compatible <= mixedLimit;
+  plan.constrained = mix ? false : ready.front()->spec.constrained;
   plan.decodeStage = decodeStage;
   for (const Request *request : ready) {
     if (request->spec.priority != selectedPriority ||
-        request->spec.constrained != plan.constrained ||
+        (!mix && request->spec.constrained != plan.constrained) ||
         request->decodeStage != decodeStage)
       continue;
+    plan.constrained = plan.constrained || request->spec.constrained;
     plan.items.push_back({request->spec.id, 0, 0});
     if (plan.width() == model::ExecutionLimits::maximumBatchWidth)
       break;

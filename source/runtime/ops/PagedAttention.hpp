@@ -4,6 +4,7 @@
 #include "metal/CommandGraph.hpp"
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/PagedAttention.h"
+#include "metal/abi/TreeVerify.h"
 #include "ops/PagedKv.hpp"
 #include "ops/Linear.hpp"
 #include "ops/Normalization.hpp"
@@ -265,6 +266,17 @@ public:
                         PagedVerifyBuffers buffers,
                         std::span<const kv::ChunkedPrefillParams> chunks,
                         const VerifyAttentionPlan &plan);
+  // addVerify for a draft-tree batch of at most two lanes: the same store,
+  // then the tree split and reduce (TQ4 rotated coalesced verify only).
+  static void addVerifyTree(metal::CommandGraph &graph, JustFitKvLayer layer,
+                            PagedVerifyBuffers buffers,
+                            std::span<const kv::ChunkedPrefillParams> chunks,
+                            const VerifyAttentionPlan &plan, const JustFitTreeBatch &tree);
+  // addVerify's store alone: a tree's accepted rows, gathered to the chain's rows.
+  static void addVerifyStore(metal::CommandGraph &graph, JustFitKvLayer layer,
+                             PagedVerifyBuffers buffers,
+                             std::span<const kv::ChunkedPrefillParams> chunks,
+                             const VerifyAttentionPlan &plan);
 };
 
 } // namespace justfit::ops

@@ -1,5 +1,6 @@
 // Modified for JustFit: product identity and integration.
 #include "engine/RuntimeResources.hpp"
+#include "engine/AneCalibrationCompatibility.hpp"
 #include "AwakeClock.hpp"
 #include "Checked.hpp"
 #include "StderrLine.hpp"
@@ -744,17 +745,34 @@ AneFfnModel aneFfnModel(metal::MetalBackend &backend, const model::LoadedModel &
     });
     return prepared;
   };
-  const std::string key = calibrationKey(*layers) + " device " + backend.capabilities().deviceName + " macos " +
-                          [[NSProcessInfo processInfo] operatingSystemVersionString].UTF8String + " build " +
-                          std::string(buildId) + " most ";
-  model.recall = [key](uint32_t maxAneUnits) -> std::optional<ops::ane_ffn::Calibration> {
+  const std::string device = backend.capabilities().deviceName;
+  const std::string context = calibrationKey(*layers) + " device " + device + " macos " +
+                              [[NSProcessInfo processInfo] operatingSystemVersionString].UTF8String;
+  const std::string key = context + " build " + std::string(buildId) + " most ";
+  model.recall = [key, context, device, totalUnits = model.units](uint32_t maxAneUnits)
+      -> std::optional<ops::ane_ffn::Calibration> {
+    // Retain the released split before consulting a newly timed 2.5 row. No
+    // Python/file-copy migration and no mutation of the released cache entry.
+    const bool rejected = ane::recall(key + std::to_string(maxAneUnits) + " released-compat-rejected").has_value();
+    if (const auto released = rejected ? std::nullopt : releasedM6Calibration(context, device, maxAneUnits, totalUnits,
+            ops::AneFfn::kMinimumRows, ops::AneFfn::kMaximumRows,
+            [](const std::string &sourceKey) { return ane::recall(sourceKey); })) {
+      logLine("ANE language calibration: preserving released JustFit 2.3.1 split (",
+              released->calibration.aneUnits, " units, ", released->calibration.minimumRows, " rows)");
+      return released->calibration;
+    }
     const std::optional<std::string> line = ane::recall(key + std::to_string(maxAneUnits));
     return line ? ops::ane_ffn::Calibration::parse(*line) : std::nullopt;
   };
   model.remember = [key](uint32_t maxAneUnits, const ops::ane_ffn::Calibration &calibration) {
     ane::remember(key + std::to_string(maxAneUnits), calibration.text());
   };
-  model.forget = [key](uint32_t maxAneUnits) { ane::forget(key + std::to_string(maxAneUnits)); };
+  model.forget = [key, device](uint32_t maxAneUnits) {
+    const std::string current = key + std::to_string(maxAneUnits);
+    ane::forget(current);
+    if (device == "Apple M6" || device.starts_with("Apple M6 "))
+      ane::remember(current + " released-compat-rejected", "1");
+  };
   model.healthy = [&backend] { return backend.healthy(); };
   return model;
 }

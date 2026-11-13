@@ -1,116 +1,86 @@
-name: Publish JustFit Python package
+name: Publish JustFit
+# The 2.6 wheel is built, signed and tested on Apple silicon outside CI. This
+# workflow publishes those exact bytes: it checks the repository source against
+# the wheel's pinned manifest, takes the wheel attached to the GitHub Release,
+# verifies its SHA-256 and uploads it with PyPI trusted publishing.
+# Run it from the release tag (Actions > Publish JustFit > Use workflow from
+# tag v2.6.0) after the GitHub Release with the wheel exists.
 on:
-  push:
-    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       index:
-        description: Target package index (production requires a matching stable tag)
+        description: Target package index (production requires the matching release tag)
         type: choice
         options: [testpypi, pypi]
         default: testpypi
         required: true
 permissions:
   contents: read
+env:
+  VERSION: 2.6.0
+  WHEEL: justfit_llm-2.6.0-py3-none-macosx_26_0_arm64.whl
+  WHEEL_SHA256: a3ef01420bb6ca44f98fa9409583357fa6a3761befd562780b9172331656584a
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.12'
       - name: Check publication target
         env:
-          TARGET_INDEX: ${{ inputs.index || 'testpypi' }}
-          RELEASE_REF: ${{ github.ref }}
+          TARGET_INDEX: ${{ inputs.index }}
         run: |
-          python - <<'PYCODE'
-          import os, re, tomllib
-          from pathlib import Path
-          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
-          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:rc[0-9]+)?', version)
-          if os.environ['RELEASE_REF'].startswith('refs/tags/'):
-              assert os.environ['RELEASE_REF'] == 'refs/tags/v' + version, 'tag must match package version'
-          if os.environ['TARGET_INDEX'] == 'pypi':
-              assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'production requires a stable version'
-              assert os.environ['RELEASE_REF'] == 'refs/tags/v' + version, 'production requires the matching reviewed release tag'
-          PYCODE
-      - name: Install runtime and build tools
-        run: python -m pip install -r requirements-runtime.txt build==1.6.1 twine==7.0.0 setuptools==84.2.1 wheel==0.48.0
-      - name: Verify reviewed sources and build distributions
-        env:
-          SOURCE_DATE_EPOCH: '1792540800'
-        run: |
-          python validate_package.py
-          python package_release.py --output "$RUNNER_TEMP/JustFit-source.zip"
-          git diff --exit-code -- package-manifest.json
-          if [ "$GITHUB_REF" != "refs/tags/v2.3.1" ]; then
-            python -m build --no-isolation
-            python -m twine check dist/*
+          if [ "$TARGET_INDEX" = pypi ]; then
+            test "$GITHUB_REF" = "refs/tags/v$VERSION" || { echo "production requires tag v$VERSION"; exit 1; }
           fi
-      - name: Fetch and verify exact reviewed stable artifacts
-        if: github.ref == 'refs/tags/v2.3.1'
-        run: |
-          python .github/fetch-release-assets.py
-          python - <<'PYCODE'
-          import hashlib, json, zipfile
-          from pathlib import Path
-          with zipfile.ZipFile('reviewed-assets/JustFit-2.3.1-project.zip') as archive:
-              manifest = json.loads(archive.read('JustFit-2.3/package-manifest.json'))
-              assert manifest == json.loads(Path('package-manifest.json').read_text())
-              for name, digest in manifest.items():
-                  assert hashlib.sha256(archive.read('JustFit-2.3/' + name)).hexdigest() == digest
-          with zipfile.ZipFile('reviewed-assets/justfit_llm-2.3.1-py3-none-any.whl') as archive:
-              for name, digest in manifest.items():
-                  assert hashlib.sha256(archive.read('justfit_llm/project/' + name)).hexdigest() == digest
-          PYCODE
-          mkdir dist
-          cp reviewed-assets/*.whl reviewed-assets/*.tar.gz dist/
-          python -m twine check dist/*
-      - name: Publish reviewed GitHub Release assets
-        if: github.ref == 'refs/tags/v2.3.1'
+      - name: Fetch the release wheel
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view v2.3.1 >/dev/null 2>&1; then
-            gh release create v2.3.1 --verify-tag --draft --title 'JustFit 2.3.1' --notes-file .github/release-notes-2.3.1.md
-          fi
-          for asset in reviewed-assets/*; do
-            name="$(basename "$asset")"
-            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v2.3.1" --jq '.assets[].name' | grep -Fxq "$name"; then
-              expected="$(sha256sum "$asset" | cut -d' ' -f1)"
-              existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v2.3.1" --jq ".assets[] | select(.name == \"$name\") | .digest")"
-              test "$existing" = "sha256:$expected"
-            else
-              gh release upload v2.3.1 "$asset"
-            fi
-          done
-          gh release edit v2.3.1 --draft=false --latest
+          mkdir dist
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "$WHEEL" --dir dist
+          echo "$WHEEL_SHA256  dist/$WHEEL" | sha256sum -c -
+      - name: Repository source matches the wheel
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, json, os, zipfile
+          wheel = zipfile.ZipFile('dist/' + os.environ['WHEEL'])
+          root = 'justfit_llm-2.6.0.data/data/share/justfit-llm/'
+          shipped = json.loads(wheel.read(root + 'package-manifest.json'))
+          assert shipped == json.load(open('package-manifest.json')), 'package-manifest.json differs from the wheel'
+          checked = 0
+          for name, digest in shipped.items():
+              assert hashlib.sha256(wheel.read(root + name)).hexdigest() == digest, name
+              if name in ('bin/justfit', 'README.md'):
+                  continue
+              assert hashlib.sha256(open(name, 'rb').read()).hexdigest() == digest, name
+              checked += 1
+          print(f'{checked} source files match the wheel')
+          PYCODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: python-distributions
+          name: wheel
           path: dist/*
           retention-days: 7
   publish:
-    needs: build
+    needs: verify
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.index || 'testpypi' }}
+    environment: ${{ inputs.index }}
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: python-distributions
+          name: wheel
           path: dist/
       - name: Publish to TestPyPI
-        if: github.event_name == 'push' || inputs.index == 'testpypi'
+        if: inputs.index == 'testpypi'
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
       - name: Publish to PyPI
         if: inputs.index == 'pypi'
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086

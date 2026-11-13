@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 namespace justfit::model {
@@ -28,6 +29,7 @@ public:
   ~DraftCheckpointLoader();
   [[nodiscard]] WeightFile layer(uint32_t index);
   [[nodiscard]] WeightFile model();
+  [[nodiscard]] bool hasMaskEmbedding() const noexcept;
 
 private:
   WeightImages &images_;
@@ -36,6 +38,8 @@ private:
 
 // Every planned file of a layout, its sections at their offsets: the layers,
 // then model.bin.
-[[nodiscard]] std::vector<affine::Image> draftCheckpointImages(const DFlashDraftLayout &layout);
+inline constexpr std::string_view kDraftMaskEmbedding = "mask_embedding";
+[[nodiscard]] std::vector<affine::Image> draftCheckpointImages(const DFlashDraftLayout &layout,
+                                                              bool hasMaskEmbedding = false);
 
 } // namespace justfit::model

@@ -82,4 +82,15 @@ void Embedding::addVerifyInput(metal::CommandGraph &graph,
             {1, 1, 1});
 }
 
+void Embedding::addDraftMaskRows(metal::CommandGraph &graph, metal::MetalBuffer mask,
+                                metal::MetalBuffer rows, uint32_t width, uint32_t lanes) {
+  if (!width || !lanes || lanes > JUSTFIT_MAXIMUM_BATCH_WIDTH)
+    throw std::invalid_argument("invalid draft mask rows");
+  requireBytes(mask, uint64_t{width} * sizeof(uint16_t), "draft mask embedding");
+  requireBytes(rows, uint64_t{lanes} * JUSTFIT_TARGET_VERIFY_ROWS * width * sizeof(uint16_t), "draft input row");
+  const DraftMaskRowsParams params{width};
+  graph.add("draft_mask_rows", {std::move(mask), std::move(rows)}, params,
+            {(width + 255) / 256, JUSTFIT_TARGET_VERIFY_ROWS - 1, lanes}, {256, 1, 1});
+}
+
 } // namespace justfit::ops

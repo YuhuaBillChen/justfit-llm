@@ -1,6 +1,8 @@
 // Modified for JustFit: product identity and integration.
 #pragma once
 
+#include "metal/abi/TreeVerify.h"
+
 #include "Model.hpp"
 #include "QwenHybridLayout.hpp"
 #include "StateLayout.hpp"
@@ -283,11 +285,19 @@ public:
       metal::CommandGraph &graph, QwenTargetPrefillBuffers buffers,
       std::span<const QwenTargetPrefillSequence> sequences, uint32_t rows,
       std::span<const JustFitKvLayer> kvLayers, ops::AneFfn *aneFfn = nullptr) const;
+  // tree: the lanes' draft trees (metal/abi/TreeVerify.h), verified in
+  // place of chains; then the accepted rows must be gathered before the
+  // commits, the GDN commit takes tree = true and addVerifyStore stores them.
   void addVerify(
       metal::CommandGraph &graph, QwenTargetVerifyBuffers buffers,
       std::span<const JustFitKvLayer> kvLayers,
       std::span<const kv::ChunkedPrefillParams> chunks,
-      uint32_t lanes) const;
+      uint32_t lanes, const JustFitTreeBatch *tree = nullptr) const;
+  // Each attention layer's verify store of buffers.chunkKeys/chunkValues.
+  void addVerifyStore(
+      metal::CommandGraph &graph, const QwenTargetVerifyBuffers &buffers,
+      std::span<const JustFitKvLayer> kvLayers,
+      std::span<const kv::ChunkedPrefillParams> chunks, uint32_t lanes) const;
   // The final norm and LM head over `lanes` lanes of targetVerifyRows rows,
   // as verify ends: one sweep of the vocabulary projection for every lane.
   void addHeadBatch(metal::CommandGraph &graph, metal::MetalBuffer hidden,
@@ -302,7 +312,7 @@ public:
   void addEmbedding(metal::CommandGraph &graph, metal::MetalBuffer tokens,
                     metal::MetalBuffer hidden, uint32_t rows) const;
   void addStateCommit(metal::CommandGraph &graph,
-                      QwenTargetCommitBuffers buffers, uint32_t lanes) const;
+                      QwenTargetCommitBuffers buffers, uint32_t lanes, bool tree = false) const;
 
 private:
   using WeightView =

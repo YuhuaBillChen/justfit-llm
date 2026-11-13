@@ -54,8 +54,8 @@ public:
     std::vector<uint32_t> pages;
   };
 
-  KvCache(KvPool &pool, CacheRecency &recency)
-      : pool_(pool), recency_(recency), blockOnPage_(pool.pageCount()) {}
+  KvCache(KvPool &pool, CacheRecency &recency, bool persistent = false)
+      : pool_(pool), recency_(recency), persistent_(persistent), blockOnPage_(pool.pageCount()) {}
   KvCache(const KvCache &) = delete;
   KvCache &operator=(const KvCache &) = delete;
   ~KvCache() noexcept;
@@ -113,6 +113,8 @@ public:
   // own block and every block above.
   void countState(uint64_t blockId, bool added, bool inUse) noexcept;
   void countStateInUse(uint64_t blockId, bool added) noexcept;
+  // Disk restore points protect their chain copies from the first write attempt.
+  void countDiskState(uint64_t blockId, bool added) noexcept;
   // A state sits below the block. Without one, the disk-only blocks below
   // it are never read again.
   [[nodiscard]] bool stateBelow(uint64_t blockId) const;
@@ -172,6 +174,16 @@ public:
   // Blocks with a disk copy, resident or not; the pool counts the resident
   // blocks (KvPoolSnapshot::pagesPrefix).
   [[nodiscard]] uint32_t diskBlocks() const noexcept { return diskBlocks_; }
+  // Resident blocks by what keeps their page (Status): a request; the restore
+  // path of a state in use, or a transfer; nothing, with a disk copy, so the
+  // page can go without a write; nothing, with no disk copy.
+  struct Residency final {
+    uint32_t inUse = 0;
+    uint32_t held = 0;
+    uint32_t idleOnDisk = 0;
+    uint32_t idleRamOnly = 0;
+  };
+  [[nodiscard]] Residency residency() const noexcept;
 
 private:
   struct Block {
@@ -192,6 +204,7 @@ private:
     uint32_t statesHere = 0;
     uint32_t statesBelow = 0;
     uint32_t statesInUseBelow = 0;
+    uint32_t diskStates = 0;
     uint32_t activeUsers = 0;
     uint32_t depth = 0;
     uint64_t lastUsed = 0;
@@ -217,6 +230,7 @@ private:
 
   KvPool &pool_;
   CacheRecency &recency_;
+  const bool persistent_;
   std::unordered_map<uint64_t, Block> blocks_;
   // The resident block on each page, 0 for none. A resident block owns its
   // page: a writer whose block already exists moves onto that block's page,

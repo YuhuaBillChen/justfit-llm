@@ -203,19 +203,20 @@ void writeQuantizedStep(const Section &section, const Step &step, const std::arr
   }
 }
 
-// float(-exp(double(A_log))) of a BF16 or F32 vector into destination.
+// Match the MLX GPU FP32 operation used to export the 2.3.1 packed model.
 void writeDecay(const Section &section, uint8_t *destination, std::vector<uint8_t> &input) {
   const SourceTensor &tensor = *section.input.tensor;
   if (input.size() < tensor.bytes) input.resize(tensor.bytes);
   tensor.read(0, {input.data(), tensor.bytes});
-  for (uint64_t i = 0; i < section.bytes / sizeof(float); ++i) {
-    float logarithm;
-    if (tensor.dtype == "BF16") logarithm = bfloat16Value(input.data() + i * kBFloat16Bytes);
-    else std::memcpy(&logarithm, input.data() + i * 4, 4);
-    const auto value = static_cast<float>(-std::exp(static_cast<double>(logarithm)));
-    if (!std::isfinite(value)) throw std::runtime_error("non-finite GDN decay");
-    std::memcpy(destination + i * sizeof(float), &value, sizeof value);
+  std::vector<float> logarithms(section.bytes / sizeof(float));
+  for (size_t i = 0; i < logarithms.size(); ++i) {
+    if (tensor.dtype == "BF16") logarithms[i] = bfloat16Value(input.data() + i * kBFloat16Bytes);
+    else std::memcpy(&logarithms[i], input.data() + i * sizeof(float), sizeof(float));
   }
+  std::span<float> values(reinterpret_cast<float *>(destination), logarithms.size());
+  writeAffineDecay(logarithms, values);
+  for (float value : values)
+    if (!std::isfinite(value)) throw std::runtime_error("non-finite GDN decay");
 }
 
 } // namespace

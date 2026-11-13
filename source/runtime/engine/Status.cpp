@@ -141,6 +141,10 @@ std::string runtimeStatusJson(
       << ",\"pages_active\":" << pool.pagesActive
       << ",\"pages_cache\":" << pool.pagesPrefix
       << ",\"pages_free\":" << pool.pagesFree
+      << ",\"blocks_in_use\":" << resources.kvResidency.inUse
+      << ",\"blocks_held\":" << resources.kvResidency.held
+      << ",\"blocks_idle_on_disk\":" << resources.kvResidency.idleOnDisk
+      << ",\"blocks_idle_ram_only\":" << resources.kvResidency.idleRamOnly
       << ",\"allocated_bytes\":" << pool.allocatedBytes
       << ",\"reclaimable_bytes\":" << pool.reclaimableBytes
       << ",\"extent_allocations\":" << pool.extentAllocations
@@ -170,6 +174,14 @@ std::string runtimeStatusJson(
       << ",\"disk_bytes\":" << state.diskBytes
       << ",\"offloads\":" << state.offloads
       << ",\"offload_failures\":" << state.offloadFailures
+      << ",\"offloads_by_cause\":{\"publication\":" << state.publicationOffloads
+      << ",\"reclaim\":" << state.reclaimOffloads
+      << ",\"persist\":" << state.persistOffloads
+      << ",\"publication_bytes\":" << state.publicationOffloadBytes
+      << ",\"reclaim_bytes\":" << state.reclaimOffloadBytes
+      << ",\"persist_bytes\":" << state.persistOffloadBytes
+      << ",\"reclaim_checkpoints\":" << state.reclaimCheckpointOffloads << "}"
+      << ",\"checkpoint_reclaim_drops\":" << state.checkpointReclaimDrops
       << ",\"invalidations\":" << state.invalidations
       << "}"
       << ",\"disk\":{\"capacity_bytes\":" << resources.kvTier.capacityBytes
@@ -219,13 +231,29 @@ std::string runtimeStatusJson(
       << ",\"decode_state_publications\":" << core.decodeStatePublications
       << ",\"decode_state_publication_failures\":" << core.decodeStatePublicationFailures
       << ",\"decode_state_promotions\":" << core.decodeStatePromotions
+      << ",\"decode_states_reused\":" << core.decodeStatesReused
+      << ",\"decode_states_in_ram\":" << core.decodeStatesInRam
+      << ",\"decode_states_on_disk\":" << core.decodeStatesOnDisk
+      << ",\"decode_states_skipped\":" << core.decodeStatesSkipped
+      << ",\"prefill_checkpoints_skipped\":" << core.prefillCheckpointsSkipped
+      << ",\"parked_states\":" << core.parkedStates
+      << ",\"parked_adoptions\":" << core.parkedAdoptions
+      << ",\"parked_adopted_tokens\":" << core.parkedAdoptedTokens
+      << ",\"parked_drops\":" << core.parkedDrops
+      << ",\"parked_entries\":" << core.parkedEntries
+      << ",\"parked_bytes\":" << core.parkedResidentBytes
       << ",\"checkpoint_publications\":" << core.checkpointPublications
       << ",\"checkpoint_publication_failures\":"
       << core.checkpointPublicationFailures
       << ",\"resource_suspensions\":" << core.resourceSuspensions
       << ",\"priority_suspensions\":" << core.prioritySuspensions
       << ",\"resource_resumptions\":" << core.resourceResumptions
-      << ",\"resource_replay_tokens\":" << core.resourceReplayTokens << "}"
+      << ",\"resource_replay_tokens\":" << core.resourceReplayTokens
+      << ",\"resume_replay_max\":" << core.resumeReplayMax
+      << ",\"resume_replay_over_127\":" << core.resumeReplayOver127
+      << ",\"finish_recovery_tokens\":" << core.finishRecoveryTokens
+      << ",\"finish_recovery_max\":" << core.finishRecoveryMax
+      << ",\"finish_recovery_over_127\":" << core.finishRecoveryOver127 << "}"
       << ",\"draft_context\":{\"target_prefill_rows\":"
       << executorTelemetry.targetPrefillRows
       << ",\"prompt_end_rows\":" << executorTelemetry.draftContextRowsActive

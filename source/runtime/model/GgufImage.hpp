@@ -41,6 +41,7 @@ struct TensorRows {
   uint64_t rows = 0;
   uint64_t rowBytes = 0;
   RowOrder order{};
+  const WeightSource *file = nullptr;
 };
 
 // Header and descriptor bytes.

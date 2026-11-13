@@ -163,7 +163,14 @@ WeightFile AffineTargetLoader::head() {
   return images_.load(affine::imagePlan(planned_, planned_->images.size() - 2, "target"));
 }
 std::shared_ptr<HostEmbedding> AffineTargetLoader::hostEmbedding() {
-  return std::make_shared<HostEmbedding>(affine::imagePlan(planned_, planned_->images.size()-1, "target"), images_.contentIdentity());
+  const auto &sections=planned_->images.back().sections;
+  if(sections.size()!=3)throw WeightStoreError("invalid source host embedding sections");
+  std::array<SourceTensor,3> tensors;
+  for(size_t i=0;i<tensors.size();++i) {
+    if(!sections[i].input.tensor)throw WeightStoreError("unbound source host embedding tensor");
+    tensors[i]=*sections[i].input.tensor;
+  }
+  return std::make_shared<HostEmbedding>(affine::imagePlan(planned_, planned_->images.size()-1, "target"), images_.contentIdentity(),planned_,std::move(tensors));
 }
 WeightFile AffineTargetLoader::embedding() {
   return images_.load(affine::imagePlan(planned_, planned_->images.size() - 1, "target"));

@@ -6,6 +6,7 @@
 #include "engine/NativeArguments.hpp"
 #include "engine/Status.hpp"
 #include "model/ModelDescriptor.hpp"
+#include "model/VisionLoader.hpp"
 
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #include <dispatch/dispatch.h>
@@ -363,6 +364,25 @@ int checkDevice() {
   return static_cast<int>(engine::NativeProcessExit::EngineFailure);
 }
 
+// Canonical BF16 vision identity for ANE caches. Keep source checkpoints intact;
+// use the same loader/writer as GPU inference and retain no converted file.
+int visionIdentity(const std::filesystem::path &root) {
+  const auto descriptor = model::inspectModelRoot(root);
+  if (descriptor.visionSource != model::VisionSource::Mlx &&
+      descriptor.visionSource != model::VisionSource::Gguf)
+    throw engine::UsageError("vision-identity requires a prepared source vision tower");
+  const model::VisionLoader loader(root / "vision", descriptor.visionSource, descriptor.vision);
+  const auto image = loader.image();
+  if (!image.bytes || image.bytes > (uint64_t{2} << 30))
+    throw engine::UsageError("vision image exceeds the ANE identity memory bound");
+  std::vector<uint8_t> bytes(image.bytes);
+  image.write(bytes, metal::MetalBuffer{});
+  const auto digest = model::weightDigest(std::span<const uint8_t>(bytes));
+  std::printf("{\"schema\":1,\"source_identity\":\"%s\",\"bytes\":%llu,\"sha256\":\"%s\"}\n",
+              descriptor.sourceIdentity.c_str(), static_cast<unsigned long long>(image.bytes), digest.c_str());
+  return 0;
+}
+
 // The engine's rules for an upstream model's configuration, which the
 // installer applies before any weight download: the family it describes, as
 // JSON, or the refusal (model::inspectSourceConfiguration).
@@ -390,6 +410,8 @@ int main(int argc, char **argv) {
     try {
       if (argc == 2 && std::string_view(argv[1]) == "device-check")
         return justfit::checkDevice();
+      if (argc == 3 && std::string_view(argv[1]) == "vision-identity")
+        return justfit::visionIdentity(argv[2]);
       if (argc > 1 && std::string_view(argv[1]) == "model-check")
         return justfit::checkModel(argc, argv);
       const justfit::engine::NativeArguments arguments =

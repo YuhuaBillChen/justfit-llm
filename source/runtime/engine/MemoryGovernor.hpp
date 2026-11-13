@@ -2,8 +2,10 @@
 #pragma once
 
 #include "metal/MetalBackend.hpp"
+#include "engine/ReclaimClass.hpp"
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <optional>
 
@@ -88,6 +90,9 @@ struct MemoryGovernorSnapshot {
   // short of critical pressure. Allocation need not ask: admission names
   // the host as the cause of every refusal the host shares.
   bool hostGrowthAllowed = true;
+  // An external worker may need more than the ordinary recovery margin:
+  // its reservation must also leave the warning margin free.
+  uint64_t hostRecoveryTargetBytes = kHostRecoveryMarginBytes;
 };
 
 // Critical pressure evicts every unpinned entry and takes what a request
@@ -101,6 +106,7 @@ struct MemoryReclaimDirective {
   bool critical = false;
   uint64_t targetBytes = 0;
   bool keepResumePoint = false;
+  ReclaimClass upTo = ReclaimClass::InUse;
 };
 
 // What a reclaim pass made of its directive's target.
@@ -167,15 +173,17 @@ public:
   // the bytes under the limit and the host's headroom while the allocation
   // runs, or refuses them with the cause: HostPressure when the host refuses,
   // whether or not the limit does too, and EngineBudget when only the limit
-  // does. The host refuses under critical pressure and, unless a request in
-  // service needs the bytes (setServing), inside the warning margin or while
-  // it holds for the recovery margin.
+  // does. The host refuses under critical pressure, inside its reserve and,
+  // unless a request in service needs the bytes (setServing), inside the
+  // warning margin or while it holds for the recovery margin.
   [[nodiscard]] metal::AllocationAdmission allocationAdmission() noexcept;
   // Marks the reservations that follow as memory a request in service needs,
   // until it is cleared. The host's margins do not refuse those: holding
   // them back would strand the request and the memory it already has, while
   // the cache it could give up instead is what the paced reclaim returns.
-  // The limit and critical pressure refuse them like any other.
+  // The limit, the host's reserve and critical pressure refuse them like
+  // any other: macOS does not report wired GPU memory as pressure, so the
+  // reserve is what keeps the system responsive.
   void setServing(bool serving) noexcept;
   void setPressure(MemoryPressure pressure) noexcept;
   // The outcome of the engine's last reclaim pass with a target. While one
@@ -215,8 +223,15 @@ public:
 
   [[nodiscard]] std::optional<Reservation> reserveExternal(uint64_t bytes) {
     metal::AllocationFailure failure;
-    return tryReserve(bytes, failure);
+    auto reservation = tryReserve(bytes, failure);
+    externalDemandBytes_ = !reservation && failure == metal::AllocationFailure::HostPressure
+                               ? bytes : 0;
+    // A refused attempt has no granted lease to release. Retries renew this
+    // short demand; abandoning an image must not leave a permanent target.
+    externalDemandUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    return reservation;
   }
+  void cancelExternalReservation() noexcept { externalDemandBytes_ = 0; }
 
 private:
   // The host under the hysteresis at one sample of its available memory.
@@ -252,6 +267,7 @@ private:
   snapshot(const std::optional<uint64_t> &hostAvailable,
            const HostState &host) const noexcept;
   void release(uint64_t bytes) noexcept;
+  [[nodiscard]] uint64_t hostRecoveryTarget() const noexcept;
 
   metal::MetalBackend &backend_;
   uint64_t limitBytes_ = 0;
@@ -259,6 +275,8 @@ private:
   HostAvailableMemoryProvider hostAvailableMemory_;
   uint64_t untrackedReserveBytes_ = 0;
   uint64_t reservedBytes_ = 0;
+  uint64_t externalDemandBytes_ = 0;
+  std::chrono::steady_clock::time_point externalDemandUntil_{};
   bool serving_ = false;
   uint64_t deniedReservations_ = 0;
   MemoryPressure systemPressure_ = MemoryPressure::Normal;

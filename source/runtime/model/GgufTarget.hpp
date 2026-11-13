@@ -17,13 +17,13 @@
 
 namespace justfit::model {
 
-// The single .gguf in a target directory (shards are not supported).
-[[nodiscard]] std::filesystem::path findTargetGguf(const std::filesystem::path &directory);
+// One GGUF or all parts of a split GGUF in validated filename order.
+[[nodiscard]] std::vector<std::filesystem::path> findTargetGgufs(const std::filesystem::path &directory);
 
 class GgufTargetLoader final {
 public:
   // Plans every image from the GGUF's metadata once.
-  GgufTargetLoader(metal::MetalBackend &backend, WeightImages &images, const std::filesystem::path &path,
+  GgufTargetLoader(metal::MetalBackend &backend, WeightImages &images, const std::vector<std::filesystem::path> &paths,
                    const QwenTargetDimensions &geometry);
   GgufTargetLoader(const GgufTargetLoader &) = delete;
   GgufTargetLoader &operator=(const GgufTargetLoader &) = delete;
@@ -38,8 +38,8 @@ public:
 private:
   // The GGUF and its images, which their writers share.
   struct Planned {
-    explicit Planned(const std::filesystem::path &path) : source(path) {}
-    WeightSource source;
+    explicit Planned(const std::vector<std::filesystem::path> &paths) : source(paths) {}
+    OpenGguf source;
     std::vector<gguf::Image> images; // layers, head, embedding
   };
   [[nodiscard]] WeightFile open(size_t index);

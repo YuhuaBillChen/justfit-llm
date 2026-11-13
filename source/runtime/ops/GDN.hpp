@@ -2,6 +2,7 @@
 #pragma once
 
 #include "metal/CommandGraph.hpp"
+#include "metal/abi/TreeVerify.h"
 #include "ops/Linear.hpp"
 #include "ops/Normalization.hpp"
 
@@ -106,7 +107,13 @@ public:
                                  LinearInput input);
   static void addCommit(metal::CommandGraph &graph, GdnCommitBuffers buffers,
                         GdnShape shape, uint32_t layers, uint32_t lanes,
-                        GdnStateStrides state);
+                        GdnStateStrides state, bool tree = false);
+  // addDecode for a draft-tree batch (metal/abi/TreeVerify.h): the 27B's
+  // 48-value-head bf16-norm layout only; the commit then takes tree = true.
+  static PreparedInput addDecodeTree(metal::CommandGraph &graph, GdnDecodeBuffers buffers,
+                                     GdnShape shape, uint32_t lanes, uint32_t layer,
+                                     GdnStateStrides state, GdnHeadOrder order,
+                                     LinearInput input, const JustFitTreeBatch &tree);
 };
 
 } // namespace justfit::ops

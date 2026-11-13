@@ -316,9 +316,7 @@ void KvCache::countState(uint64_t blockId, bool added, bool inUse) noexcept {
     added ? ++entry.statesBelow : --entry.statesBelow;
     if (inUse)
       added ? ++entry.statesInUseBelow : --entry.statesInUseBelow;
-    // Its copy is needed again, or no longer.
-    if (entry.statesBelow == (added ? 1u : 0u))
-      reindex(entry);
+
   });
 }
 
@@ -326,6 +324,19 @@ void KvCache::countStateInUse(uint64_t blockId, bool added) noexcept {
   countAbove(blockId, [&](Block &entry) {
     added ? ++entry.statesInUseBelow : --entry.statesInUseBelow;
   });
+}
+
+void KvCache::countDiskState(uint64_t blockId, bool added) noexcept {
+  if (!persistent_) return;
+  for (uint64_t id = blockId; id;) {
+    const auto found = blocks_.find(id);
+    if (found == blocks_.end()) std::terminate();
+    Block &entry = found->second;
+    if (!added && !entry.diskStates) std::terminate();
+    added ? ++entry.diskStates : --entry.diskStates;
+    if (entry.diskStates == (added ? 1u : 0u)) reindex(entry);
+    id = entry.parent;
+  }
 }
 
 bool KvCache::stateBelow(uint64_t blockId) const { return block(blockId).statesBelow > 0; }
@@ -583,7 +594,7 @@ void KvCache::reindex(Block &entry) noexcept {
     duplicates_.link(entry.diskNode, entry.lastUsed, entry.id);
   else if (entry.slot && !entry.children)
     diskLeaves_.link(entry.diskNode, entry.lastUsed, entry.id);
-  if (entry.slot && !entry.statesHere && !entry.statesBelow && (resident || !entry.children))
+  if (persistent_ && entry.slot && (resident ? !entry.diskStates : !entry.statesHere && !entry.children))
     unneeded_.link(entry.unneededNode, entry.lastUsed, entry.id);
 }
 
@@ -598,6 +609,23 @@ void KvCache::erasePoisonedLeaf(uint64_t blockId) noexcept {
   } catch (...) {
     std::terminate();
   }
+}
+
+KvCache::Residency KvCache::residency() const noexcept {
+  Residency result;
+  for (const auto &[id, entry] : blocks_) {
+    if (entry.page == noPage)
+      continue;
+    if (entry.activeUsers)
+      ++result.inUse;
+    else if (entry.statesInUseBelow || entry.transferring)
+      ++result.held;
+    else if (entry.slot)
+      ++result.idleOnDisk;
+    else
+      ++result.idleRamOnly;
+  }
+  return result;
 }
 
 } // namespace justfit::engine

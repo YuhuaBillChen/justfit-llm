@@ -1,4 +1,5 @@
 // Modified for JustFit: product identity and integration.
+#include "metal/abi/TreeVerify.h"
 #include "engine/Bootstrap.hpp"
 #include "StderrLine.hpp"
 
@@ -114,9 +115,12 @@ protocol::ProtocolLimits protocolLimitsFor(
   limits.maxPromptTokens = maxContext;
   limits.maxLogicalOutputTokens = maxContext;
   limits.maxTokenBatch = model::ExecutionLimits::maximumStepTokens;
-  limits.maxSimulationTokens = model::ExecutionLimits::draftQueryRows;
-  limits.maxMaskWords = model::maskWordsPerToken(capabilities.vocabularySize) *
-                        (model::ExecutionLimits::draftQueryRows + 1);
+  // A draft tree's mask request (MaskTreeRequest) names up to
+  // JUSTFIT_TREE_MAXIMUM_ROWS rows; a chain's, draftQueryRows.
+  const uint32_t simulationRows =
+      std::max<uint32_t>(model::ExecutionLimits::draftQueryRows, JUSTFIT_TREE_MAXIMUM_ROWS);
+  limits.maxSimulationTokens = simulationRows;
+  limits.maxMaskWords = model::maskWordsPerToken(capabilities.vocabularySize) * (simulationRows + 1);
   return limits;
 }
 
@@ -359,6 +363,7 @@ std::unique_ptr<RuntimeBootstrap> RuntimeBootstrap::start(
       const char *setting = std::getenv("JUSTFIT_ANE_VISION_PRIORITY");
       const bool priority = setting && std::strcmp(setting, "1") == 0;
       if (!bytes) {
+        governor->cancelExternalReservation();
         const bool released = external->erase(id) != 0;
         if (priority && released && external->empty()) model->endExternalVision();
         return true;

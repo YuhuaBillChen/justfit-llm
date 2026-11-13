@@ -136,6 +136,9 @@ private:
   QwenLogicalLengths lengths_;
   std::shared_ptr<SlotFile> file_;
   std::shared_ptr<SlotFile::Slot> disk_;
+  // A lane's state taken at the exact position its request stopped (park):
+  // restored like any RAM state, at a length a page need not divide.
+  bool exact_ = false;
 
   friend class QwenStateStorage;
 };
@@ -175,9 +178,23 @@ public:
   tryActivateLane(uint32_t lane, uint64_t requestId, uint64_t extraBytes = 0,
                   const std::function<void()> &allocateExtra = {});
   void releaseLane(uint32_t lane, uint64_t requestId);
+  // Releases the lane but keeps its state where its request stopped: the
+  // current GDN cell and the draft ring move, uncopied, into a RAM state at
+  // the lane's lengths; the other cell returns to the pool. A later request
+  // that extends the same tokens restores it (beginRestore).
+  [[nodiscard]] std::shared_ptr<const QwenCompositeState> park(uint32_t lane,
+                                                               uint64_t requestId);
   // A lane that starts at length zero without a restore reads zero recurrent
   // state; its first transition overwrites the other parity.
   void clearForColdStart(uint32_t lane);
+  // A lane whose request found a row that is not finite may hold such rows in
+  // its draft rings. Draft attention weighs the ring positions a request has
+  // not written by zero, so one would reach the lane's next request as
+  // 0 x NaN: the rings are cleared before the lane is released. Its GDN cells
+  // and context window need no such care: a start clears or overwrites the
+  // cell it reads, a transition writes the other cell before reading it, and
+  // rings are computed only from window rows their request wrote.
+  void clearDraftRings(uint32_t lane);
 
   // Returns one pooled buffer to macOS, a cell before a ring, keeping one
   // lane's cells and ring when keepLane: what a reclaim step for a denied

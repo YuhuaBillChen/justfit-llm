@@ -481,6 +481,15 @@ std::optional<ProtocolIssue> validateMaskRequest(const MaskRequestEvent &event,
     return invalidEvent(IssueCode::InvalidCount, event.requestId,
                         "mask request dimensions are invalid");
   }
+  if (!event.simulationParents.empty()) {
+    bool tree = event.simulationParents.size() == event.simulationTokens.size() &&
+                event.simulationParents.front() == 0;
+    for (size_t row = 1; tree && row < event.simulationParents.size(); ++row)
+      tree = event.simulationParents[row] < row;
+    if (!tree)
+      return invalidEvent(IssueCode::InvalidCount, event.requestId,
+                          "mask tree parents are invalid");
+  }
   uint64_t maskRows = 0;
   uint64_t totalWords = 0;
   if (!checkedAdd(event.simulationTokens.size(), 1, maskRows) ||
@@ -608,16 +617,19 @@ EncodedEvent encodeMaskRequest(const MaskRequestEvent &event,
                                const ProtocolLimits &limits) {
   if (auto issue = validateMaskRequest(event, limits))
     return failure<std::vector<uint8_t>>(std::move(*issue));
+  const bool tree = !event.simulationParents.empty();
   Writer writer =
-      frameWriter(FrameType::MaskRequest,
+      frameWriter(tree ? FrameType::MaskTreeRequest : FrameType::MaskRequest,
                   kMaskRequestFixedBytes +
-                      event.simulationTokens.size() * sizeof(uint32_t));
+                      (event.simulationTokens.size() + event.simulationParents.size()) * sizeof(uint32_t));
   writer.u64(event.requestId);
   writer.u64(event.maskRequestId);
   writer.u32(event.wordsPerMask);
   writer.u32(static_cast<uint32_t>(event.simulationTokens.size()));
   for (uint32_t token : event.simulationTokens)
     writer.u32(token);
+  for (uint32_t parent : event.simulationParents)
+    writer.u32(parent);
   return success(writer.take());
 }
 
@@ -850,6 +862,8 @@ std::string_view frameTypeName(FrameType type) {
     return "tokens";
   case FrameType::MaskRequest:
     return "mask_request";
+  case FrameType::MaskTreeRequest:
+    return "mask_tree_request";
   case FrameType::Done:
     return "done";
   case FrameType::Error:

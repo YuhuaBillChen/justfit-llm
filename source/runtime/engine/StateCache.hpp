@@ -6,12 +6,14 @@
 #include "engine/RecencyOrder.hpp"
 #include "model/Model.hpp"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -80,6 +82,13 @@ struct StateCacheSnapshot {
   uint64_t diskBytes = 0;
   uint64_t offloads = 0;
   uint64_t offloadFailures = 0;
+  // offloads and their bytes by what started them: a publication with no RAM
+  // copy, a reclaim moving a RAM copy out, a restore point made durable.
+  uint64_t publicationOffloads = 0, reclaimOffloads = 0, persistOffloads = 0;
+  uint64_t publicationOffloadBytes = 0, reclaimOffloadBytes = 0, persistOffloadBytes = 0;
+  // Reclaims of disposable checkpoints: written out first, or dropped
+  // unwritten (dropCheckpointsOnReclaim).
+  uint64_t reclaimCheckpointOffloads = 0, checkpointReclaimDrops = 0;
   uint64_t invalidations = 0;
   uint64_t promotions = 0;
   // Restores that left no RAM copy behind: the request runs from the
@@ -98,6 +107,9 @@ struct StateCacheSnapshot {
   // Evictions by a reclaim; rolling retirements are counted separately.
   uint64_t checkpointEvictions = 0;
 };
+
+// What started a state's write to disk (StateCacheSnapshot).
+enum class OffloadSource : uint8_t { Publication, Reclaim, Persist };
 
 struct StateEviction final {
   bool evicted = false;
@@ -186,6 +198,16 @@ public:
   // false only when the matching checkpoint is pinned; absent, replaced and
   // upgraded publications already satisfy the postcondition.
   bool retireCheckpointState(StateCheckpoint checkpoint) noexcept;
+  // 2.6 RAM-only checkpoints: a reclaim drops a disposable checkpoint instead
+  // of writing it out first.
+  void dropCheckpointsOnReclaim(bool drop) noexcept { dropCheckpoints_ = drop; }
+  // While set, reclaim leaves this checkpoint alone: a lane keeps it as its
+  // recovery point until the snapshot that room is made for is published.
+  void spareCheckpoint(uint64_t kvBlock) noexcept { spared_ = kvBlock; }
+  // A prefill checkpoint a lane still prefills past is its only recovery
+  // point should it be suspended: a reclaim writes it out (as with checkpoints on disk)
+  // instead of dropping it. Unprotected again when the entry goes.
+  void protectCheckpoint(uint64_t kvBlock) { protected_.insert(kvBlock); }
   // An unfinished request's conversation resumes from the state at this
   // block, published or yet to be. Until the handle is released that state
   // is in use, and so is the KV it restores through: the candidates below
@@ -314,13 +336,15 @@ private:
   // Starts the write of the block's state, giving up quota through makeRoom
   // while the tier refuses one; null while the one write in flight holds the
   // staging buffer. makeRoom leaves states in RAM alone: reclaim holds the
-  // entry it writes.
+  // entry it writes. The disk copy counts for the KV from the first attempt
+  // (KvCache::countDiskState), and no longer once none starts.
   [[nodiscard]] std::unique_ptr<StateOffload> startWrite(uint64_t kvBlock,
                                                          const StateWriter &write);
-  // The disk copy this write carries becomes the entry's; the write is the
-  // one in flight, reading `source` in place when given.
+  // The disk copy this write carries, counted since startWrite, becomes the
+  // entry's; the write is the one in flight, reading `source` in place when
+  // given.
   void beginWrite(uint64_t kvBlock, Entry &entry, std::unique_ptr<StateOffload> transfer,
-                  std::shared_ptr<const CompositeState> source);
+                  std::shared_ptr<const CompositeState> source, OffloadSource cause);
   // In a persistent tier, labels the entry's disk copy with its block,
   // class and recency.
   void labelDisk(uint64_t kvBlock, const Entry &entry) const;
@@ -331,7 +355,8 @@ private:
   acquireBlock(uint64_t kvBlock);
   // Places the entry in the orders its copies call for.
   void reindex(uint64_t kvBlock, Entry &entry) noexcept;
-  void discardDisk(Entry &entry) noexcept;
+  void discardRam(Entry &entry) noexcept;
+  void discardDisk(uint64_t kvBlock, Entry &entry) noexcept;
   // An ordinary publication or reuse: the block has held a reusable state,
   // and a checkpoint is upgraded.
   void makeOrdinary(uint64_t kvBlock, Entry &entry);
@@ -347,6 +372,10 @@ private:
   CacheRecency &recency_;
   DiskRoom makeRoom_;
   bool persistent_;
+  bool dropCheckpoints_ = false;
+  uint64_t spared_ = 0;
+  std::unordered_set<uint64_t> protected_;
+  uint64_t reclaimCheckpointOffloads_ = 0, checkpointReclaimDrops_ = 0;
   std::function<void()> completion_;
   std::unordered_map<uint64_t, Entry> entries_;
   RecencyOrder ordinary_;
@@ -372,6 +401,8 @@ private:
   uint64_t checkpointEvictions_ = 0;
   uint64_t offloads_ = 0;
   uint64_t offloadFailures_ = 0;
+  std::array<uint64_t, 3> offloadsBy_{};
+  std::array<uint64_t, 3> offloadBytesBy_{};
   uint64_t invalidations_ = 0;
   // Destroyed before entries_: the ticket's disk copy may still be an entry.
   std::optional<PendingOffload> pending_;

@@ -38,6 +38,147 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
+#include <queue>
+#include "metal/abi/TreeVerify.h"
+
+// Experiment-only decode trace (JUSTFIT_EXP_TRACE=path): no effect on computation.
+namespace {
+FILE *expTrace() {
+  static FILE *file = [] { const char *path = std::getenv("JUSTFIT_EXP_TRACE"); return path ? std::fopen(path, "a") : nullptr; }();
+  return file;
+}
+void expTokens(FILE *f, const char *key, const uint32_t *v, size_t n) {
+  std::fprintf(f, ",\"%s\":[", key);
+  for (size_t i = 0; i < n; ++i) std::fprintf(f, i ? ",%u" : "%u", v[i]);
+  std::fputc(']', f);
+}
+// Experiment (JUSTFIT_TREE): one lane's draft tree from the selector's
+// candidates and scores (draft_select_dflash: candidate j at position p after
+// predecessor k scores unary[p][j] + edges[p][k][j]). Nodes are taken best
+// first by path log-probability, each node's children by a log-softmax over
+// its sixteen candidates; rows are the DFS preorder with children best first,
+// so row 1.. of the leftmost path is the selector's chain while it lasts.
+JustFitTreeLane buildDraftTree(const uint32_t *candidates, const float *unary, const float *edges,
+                               uint32_t anchor, uint32_t rows, double *expected = nullptr,
+                               double *chainExpected = nullptr, const uint32_t *chainPicks = nullptr) {
+  constexpr uint32_t C = JUSTFIT_DRAFT_CANDIDATES, P = JUSTFIT_DRAFT_PROPOSAL_TOKENS;
+  struct Node { uint32_t token, depth, pick; int parent; double logp; std::vector<uint32_t> children; bool chain = false; };
+  struct Item { double logp; uint32_t position, pick, parent; };
+  const auto worse = [](const Item &a, const Item &b) { return a.logp < b.logp || (a.logp == b.logp && a.pick > b.pick); };
+  std::priority_queue<Item, std::vector<Item>, decltype(worse)> heap(worse);
+  std::vector<Node> nodes{{anchor, 0, 0, -1, 0.0, {}}};
+  // chainPicks (a sampled lane): the draft's sampled chain, its candidate
+  // index at each position, is the tree's leftmost path whatever its scores;
+  // the other nodes are taken best first among the chain nodes' other
+  // children and their descendants.
+  const auto expand = [&](uint32_t parent, uint32_t position, uint32_t predecessor, double base,
+                          uint32_t skip = UINT32_MAX) {
+    std::array<double, C> score{};
+    double top = -std::numeric_limits<double>::infinity();
+    for (uint32_t j = 0; j < C; ++j) {
+      score[j] = double(unary[position * C + j]) + double(edges[(position * C + predecessor) * C + j]);
+      top = std::max(top, score[j]);
+    }
+    double total = 0;
+    for (uint32_t j = 0; j < C; ++j) total += std::exp(score[j] - top);
+    const double normalizer = top + std::log(total);
+    for (uint32_t j = 0; j < C; ++j)
+      if (j != skip) heap.push({base + score[j] - normalizer, position, j, parent});
+  };
+  if (chainPicks) {
+    nodes[0].chain = true;
+    uint32_t parent = 0, predecessor = 0;
+    double logp = 0;
+    for (uint32_t position = 0; position < P && nodes.size() < rows; ++position) {
+      const uint32_t pick = chainPicks[position];
+      double top = -std::numeric_limits<double>::infinity(), total = 0;
+      for (uint32_t j = 0; j < C; ++j)
+        top = std::max(top, double(unary[position * C + j]) + double(edges[(position * C + predecessor) * C + j]));
+      for (uint32_t j = 0; j < C; ++j)
+        total += std::exp(double(unary[position * C + j]) + double(edges[(position * C + predecessor) * C + j]) - top);
+      const double base = logp;
+      logp += double(unary[position * C + pick]) + double(edges[(position * C + predecessor) * C + pick]) - top - std::log(total);
+      expand(parent, position, predecessor, base, pick);
+      const uint32_t index = static_cast<uint32_t>(nodes.size());
+      nodes.push_back({candidates[position * C + pick], position + 1, pick, int(parent), logp, {}, true});
+      nodes[parent].children.push_back(index);
+      parent = index;
+      predecessor = pick;
+    }
+  } else {
+    expand(0, 0, 0, 0.0);
+  }
+  while (nodes.size() < rows && !heap.empty()) {
+    const Item item = heap.top();
+    heap.pop();
+    const uint32_t index = static_cast<uint32_t>(nodes.size());
+    nodes.push_back({candidates[item.position * C + item.pick], item.position + 1, item.pick,
+                     int(item.parent), item.logp, {}});
+    nodes[item.parent].children.push_back(index);
+    if (item.position + 1 < P) expand(index, item.position + 1, item.pick, item.logp);
+  }
+  if (expected) {
+    *expected = 0;
+    for (size_t i = 1; i < nodes.size(); ++i) *expected += std::exp(nodes[i].logp);
+  }
+  if (chainExpected) {
+    // The selector's chain: each position's best candidate after the one before.
+    *chainExpected = 0;
+    double logp = 0;
+    uint32_t predecessor = 0;
+    for (uint32_t position = 0; position < P; ++position) {
+      double top = -std::numeric_limits<double>::infinity(), total = 0;
+      uint32_t best = 0;
+      for (uint32_t j = 0; j < C; ++j) {
+        const double score = double(unary[position * C + j]) + double(edges[(position * C + predecessor) * C + j]);
+        if (score > top) { top = score; best = j; }
+      }
+      for (uint32_t j = 0; j < C; ++j)
+        total += std::exp(double(unary[position * C + j]) + double(edges[(position * C + predecessor) * C + j]) - top);
+      logp -= std::log(total);
+      *chainExpected += std::exp(logp);
+      predecessor = best;
+    }
+  }
+  JustFitTreeLane tree{};
+  tree.rows = static_cast<uint32_t>(nodes.size());
+  uint32_t next = 0;
+  std::vector<uint32_t> stack;
+  std::array<bool, JUSTFIT_TREE_MAXIMUM_ROWS> assigned{};
+  std::function<void(uint32_t, uint32_t)> visit = [&](uint32_t node, uint32_t parentRow) {
+    const uint32_t row = next++;
+    tree.parent[row] = parentRow;
+    tree.depth[row] = nodes[node].depth;
+    tree.token[row] = nodes[node].token;
+    stack.push_back(row);
+    auto children = nodes[node].children;
+    std::sort(children.begin(), children.end(), [&](uint32_t a, uint32_t b) {
+      if (nodes[a].chain != nodes[b].chain) return nodes[a].chain;
+      return nodes[a].logp > nodes[b].logp || (nodes[a].logp == nodes[b].logp && nodes[a].pick < nodes[b].pick);
+    });
+    if (children.empty()) {
+      const uint32_t copy = tree.copies++;
+      tree.path_length[copy] = static_cast<uint32_t>(stack.size());
+      for (uint32_t i = 0; i < stack.size(); ++i) tree.path[copy][i] = stack[i];
+      for (uint32_t r : stack)
+        if (!assigned[r]) { assigned[r] = true; tree.copy[r] = copy; }
+    }
+    for (uint32_t child : children) visit(child, row);
+    stack.pop_back();
+  };
+  visit(0, 0);
+  return tree;
+}
+
+void expFloats(FILE *f, const char *key, const float *v, size_t n) {
+  std::fprintf(f, ",\"%s\":[", key);
+  for (size_t i = 0; i < n; ++i) std::fprintf(f, i ? ",%.6g" : "%.6g", v[i]);
+  std::fputc(']', f);
+}
+} // namespace
 #include <utility>
 #include <vector>
 
@@ -272,6 +413,8 @@ struct Runtime::Impl {
     LookupController lookupController;
     bool lookupTail = false;
     uint32_t verifyRows = 8;
+    // Experiment: this cycle verifies the lane's draft tree (JUSTFIT_TREE).
+    bool treeCycle = false;
     std::vector<uint32_t> lookupHistory;
     DecodeStage decodeStage = DecodeStage::Regular;
     std::optional<DraftContextPlan> draftContextPlan;
@@ -279,6 +422,10 @@ struct Runtime::Impl {
     // What its activation took from a cached state: the images that end
     // there were left out (ModelRequest::restoredTokens).
     uint32_t restoredTokens = 0;
+    // A step of it found a row that is not finite (ModelStepResult::failure):
+    // its lane's draft rings may hold such rows, so the lane returns them
+    // cleared (QwenStateStorage::clearDraftRings).
+    bool resultInvalid = false;
   };
 
   struct DecodeLaneResult final {
@@ -653,6 +800,14 @@ struct Runtime::Impl {
     return bytes;
   }
 
+  // A resident request returns its lane's buffers to the pool.
+  void releaseLane(Request &entry) {
+    if (entry.resultInvalid)
+      states.clearDraftRings(entry.stateLane);
+    states.releaseLane(entry.stateLane, entry.id);
+    pageTableBindings[entry.stateLane] = {};
+  }
+
   // A request lets go of its images; the encoded ones stay in the cache.
   void releaseImages(Request &entry) {
     for (const ImageState &image : entry.images) {
@@ -952,7 +1107,8 @@ struct Runtime::Impl {
   static void stageSamplingCycle(Request &entry) noexcept {
     entry.cycleUniforms.fill(0.0F);
     for (uint32_t index = JUSTFIT_UNIFORM_PROPOSALS;
-         index < (entry.verifyRows == 16 ? JUSTFIT_SAMPLING_UNIFORMS : 16u); ++index) {
+         index < (entry.treeCycle && entry.verifyRows == 16 ? JUSTFIT_SAMPLING_UNIFORMS
+                  : entry.verifyRows == 16 ? 24u : 16u); ++index) {
       entry.cycleUniforms[index] = nextUniform(entry);
     }
   }
@@ -1078,6 +1234,110 @@ struct Runtime::Impl {
   static ops::SamplingPenalties samplingPenalties(const Request &entry) noexcept {
     return {entry.sampling.repetitionPenalty, entry.sampling.presencePenalty,
             entry.sampling.frequencyPenalty};
+  }
+
+  static bool treeEnabled() {
+    const auto on = [](const char *name) { const char *v = std::getenv(name); return v && std::strcmp(v, "1") == 0; };
+    return on("JUSTFIT_TREE") && on("JUSTFIT_ROTATED_VERIFY") && on("JUSTFIT_VERIFY_COALESCED");
+  }
+  // JUSTFIT_TREE_ROWS: 8, 16, or adaptive (the default): plan 16 rows and
+  // let each cycle take 8 or 16 by its trees' expected acceptance per cost
+  // (JUSTFIT_TREE_COST16, the 16-row cycle's time over the 8-row one's).
+  static uint32_t treeRows() {
+    const char *v = std::getenv("JUSTFIT_TREE_ROWS");
+    return v && std::strcmp(v, "8") == 0 ? 8u : 16u;
+  }
+  static bool treeAdaptive() {
+    const char *v = std::getenv("JUSTFIT_TREE_ROWS");
+    return !v || std::strcmp(v, "adaptive") == 0;
+  }
+  // JUSTFIT_TREE_COST16_B2: the same ratio for a two-lane batch. The 16
+  // rows' attention grows with the history: JUSTFIT_TREE_COST16_SLOPE adds
+  // its measured increase per 1024 tokens of the batch's longest history.
+  static double treeCost16(uint32_t width, uint64_t context) {
+    const char *v = std::getenv(width == 2 ? "JUSTFIT_TREE_COST16_B2" : "JUSTFIT_TREE_COST16");
+    const char *slope = std::getenv("JUSTFIT_TREE_COST16_SLOPE");
+    return (v ? std::atof(v) : (width == 2 ? 1.3 : 1.1)) +
+           (slope ? std::atof(slope) : 0.003) * double(context) / 1024.0;
+  }
+  static double treeOverhead() {
+    const char *v = std::getenv("JUSTFIT_TREE_OVERHEAD");
+    return v ? std::atof(v) : 1.02;
+  }
+  // JUSTFIT_TREE_CONSTRAINED=1: grammar-constrained lanes verify trees too,
+  // with a mask per tree row (MaskTreeRequest).
+  static bool treeConstrained() {
+    const char *v = std::getenv("JUSTFIT_TREE_CONSTRAINED");
+    return v && std::strcmp(v, "1") == 0;
+  }
+  static bool treeSampled() {
+    const char *v = std::getenv("JUSTFIT_TREE_SAMPLED");
+    return v && std::strcmp(v, "1") == 0;
+  }
+  static bool treeOverLookup() {
+    const char *v = std::getenv("JUSTFIT_TREE_OVER_LOOKUP");
+    return v && std::strcmp(v, "1") == 0;
+  }
+
+  // Greedy tree acceptance: the accepted path in chain order into the
+  // output tokens and counts, its rows into VerifyCandidates for the gathers.
+  void encodeTreeAcceptance(CommandGraph &graph, uint32_t width, std::span<const uint32_t> limits,
+                            const JustFitTreeBatch &tree, uint32_t samplingMask = 0,
+                            std::array<uint32_t, 2> chainRows = {},
+                            std::array<std::array<float, JUSTFIT_TREE_MAXIMUM_DEPTH>, 2> chainQ = {}) {
+    JustFitTreeAcceptParams params{};
+    params.tree = tree;
+    for (uint32_t lane = 0; lane < width; ++lane) params.remaining[lane] = limits[lane];
+    params.stop_token_0 = geometry.target.stopTokens[0];
+    params.stop_token_1 = geometry.target.stopTokens[1];
+    params.sampling_mask = samplingMask;
+    for (uint32_t lane = 0; lane < width; ++lane) {
+      params.chain_rows[lane] = chainRows[lane];
+      for (uint32_t r = 0; r < JUSTFIT_TREE_MAXIMUM_DEPTH; ++r) params.chain_q[lane][r] = chainQ[lane][r];
+    }
+    graph.add("verify_tree_accept",
+              {decodeArena->batchSlice(DecodeTensor::OutputTokens, width),
+               decodeArena->batchSlice(DecodeTensor::RetainedCount, width),
+               decodeArena->batchSlice(DecodeTensor::AcceptedCount, width),
+               decodeArena->batchSlice(DecodeTensor::VerifyCandidates, width),
+               decodeArena->batchSlice(DecodeTensor::TargetVocabularyRows, width),
+               decodeArena->batchSlice(DecodeTensor::SamplingUniforms, width)},
+              params, {width, 1, 1}, {1, 1, 1});
+  }
+
+  // The accepted path's rows of every tensor the commits read, gathered to
+  // rows 0 .. retained - 1: then the commits run as after a chain that
+  // accepted the path.
+  void encodeTreeGathers(CommandGraph &graph, uint32_t width) {
+    const uint32_t rows = ops::activeVerifyRows();
+    const uint32_t storage = targetModel.decodeStorageLanes(width);
+    const MetalBuffer path = decodeArena->batchSlice(DecodeTensor::VerifyCandidates, width);
+    const MetalBuffer retained = decodeArena->batchSlice(DecodeTensor::RetainedCount, width);
+    const auto gather = [&](MetalBuffer data, JustFitTreeGatherParams params) {
+      params.lanes = width;
+      graph.add("verify_tree_gather", {std::move(data), path, retained}, params,
+                {(params.columns + 255) / 256, params.layers, width}, {256, 1, 1});
+    };
+    const auto row = [&](uint32_t units, uint32_t layerStride, uint32_t layers) {
+      return JustFitTreeGatherParams{units, units, 1, 0, units, rows * units, layerStride, layers, 0};
+    };
+    const ops::GdnShape shape = geometry.target.gdnShape();
+    const uint32_t gdnLayers = geometry.target.stateLayout.layers, layerRows = kLaneCount * kDecodeRows;
+    gather(decodeArena->gdnStorage(DecodeTensor::VerifyPackedBase), row(shape.packedWidth, layerRows * shape.packedWidth, gdnLayers));
+    gather(decodeArena->gdnStorage(DecodeTensor::VerifyMixedBase),
+           row(shape.convolutionDimension, layerRows * shape.convolutionDimension, gdnLayers));
+    gather(decodeArena->gdnStorage(DecodeTensor::VerifyDecayBase), row(2 * shape.valueHeads, layerRows * 2 * shape.valueHeads, gdnLayers));
+    gather(decodeArena->gdnStorage(DecodeTensor::VerifyBetaBase), row(shape.valueHeads, layerRows * shape.valueHeads, gdnLayers));
+    const uint32_t heads = geometry.target.kvLayout.kvHeads, dimension = geometry.target.kvLayout.headDimension;
+    const uint32_t stride = kv::kVerifyChunkStride, laneStride = heads * stride * dimension;
+    for (uint32_t layer = 0; layer < geometry.target.kvLayout.attentionLayers; ++layer) {
+      gather(decodeArena->attentionBatchSlice(DecodeTensor::ChunkKeysBase, layer, storage),
+             {heads * dimension, dimension, 1, stride * dimension, dimension, laneStride, 0, 1, 0});
+      gather(decodeArena->attentionBatchSlice(DecodeTensor::ChunkValuesBase, layer, storage),
+             {heads * dimension, heads * dimension, stride, 0, 1, laneStride, 0, 1, 0});
+    }
+    gather(decodeArena->batchSlice(DecodeTensor::CapturedTargetHidden, storage),
+           row(geometry.target.capturedHiddenSize(), 0, 1));
   }
 
   static ops::SamplingPolicy samplingPolicy(const Request &entry) noexcept {
@@ -1260,8 +1520,10 @@ struct Runtime::Impl {
         // A failed selection leaves no anchor: the engine ends the request
         // before any output, and the other lanes go on.
         result.failure = invalidSelection({&token, 1});
-        if (!result.failure.empty())
+        if (!result.failure.empty()) {
+          entry.resultInvalid = true;
           continue;
+        }
         commitSelected(entry, {&token, 1});
         entry.maskWords.clear();
         entry.finalTargetHidden.clear();
@@ -1423,8 +1685,22 @@ struct Runtime::Impl {
         batch.capturedRows, std::span(spans).first(spanCount));
   }
 
-  // Returns each lane's draft captures, indexed like `entries`.
-  std::array<DispatchDraftCapturePlan, kLaneCount>
+  // What a ragged prefill command leaves its completion, by lane, indexed
+  // like `entries`: its draft captures, and the last row of the target's
+  // final hidden it computed, which no later work in the command writes.
+  struct RaggedPrefillOutputs final {
+    std::array<DispatchDraftCapturePlan, kLaneCount> captures{};
+    std::array<MetalBuffer, kLaneCount> lastRows{};
+  };
+
+  // Whether every value of a BF16 row is finite.
+  static bool finiteRow(const MetalBuffer &row) {
+    const uint16_t *bits = contents<uint16_t>(row, "final prefill row");
+    return std::none_of(bits, bits + row.sizeBytes() / sizeof(uint16_t),
+                        [](uint16_t value) { return (value & 0x7F80) == 0x7F80; });
+  }
+
+  RaggedPrefillOutputs
   encodeRaggedPrefillGraph(CommandGraph &graph,
                            std::span<const ModelBatchItem> items,
                            std::array<Request *, kLaneCount> &entries) {
@@ -1537,10 +1813,14 @@ struct Runtime::Impl {
           graph, std::span(selections).first(selectionCount),
           static_cast<uint32_t>(batch.sequences.size()));
     }
-    std::array<DispatchDraftCapturePlan, kLaneCount> captures{};
-    for (const RaggedPrefillSequence &sequence : batch.sequences)
-      captures[sequence.lane] = sequence.captures;
-    return captures;
+    RaggedPrefillOutputs outputs;
+    for (const RaggedPrefillSequence &sequence : batch.sequences) {
+      outputs.captures[sequence.lane] = sequence.captures;
+      outputs.lastRows[sequence.lane] =
+          prefillU16(finalHidden, sequence.rowBegin + sequence.item->tokenCount - 1, 1,
+                     geometry.target.hiddenSize);
+    }
+    return outputs;
   }
 
   void prepareDecodeLane(Request &entry, const ModelBatchItem &item,
@@ -1665,7 +1945,9 @@ struct Runtime::Impl {
 
   void encodeTargetVerifyBatchForward(CommandGraph &graph,
                                       std::span<Request *const> entries,
-                                      std::span<const ModelBatchItem> items) {
+                                      std::span<const ModelBatchItem> items,
+                                      const JustFitTreeBatch *tree = nullptr,
+                                      bool storeOnly = false) {
     if (entries.empty() || entries.size() > kLaneCount ||
         entries.size() != items.size()) {
       throw std::invalid_argument("invalid target verify batch");
@@ -1740,12 +2022,15 @@ struct Runtime::Impl {
       chunkValues[layer] = decodeArena->attentionBatchSlice(
           DecodeTensor::ChunkValuesBase, layer, storage);
     }
-    targetModel.addVerify(graph, std::move(buffers), kvPages.layers(),
-                          std::span(chunks).first(lanes), lanes);
+    if (storeOnly)
+      targetModel.addVerifyStore(graph, buffers, kvPages.layers(), std::span(chunks).first(lanes), lanes);
+    else
+      targetModel.addVerify(graph, std::move(buffers), kvPages.layers(),
+                            std::span(chunks).first(lanes), lanes, tree);
   }
 
   void encodeTargetVerifyBatchPolicy(CommandGraph &graph,
-                                     std::span<Request *const> entries) {
+                                     std::span<Request *const> entries, bool tree = false) {
     if (entries.empty() || entries.size() > kLaneCount)
       throw std::invalid_argument("invalid target policy batch");
     const uint32_t lanes = static_cast<uint32_t>(entries.size());
@@ -1760,7 +2045,7 @@ struct Runtime::Impl {
     sampling.addVerify(graph, std::span(policies).first(lanes),
                        samplingBuffers(lanes), geometry.target.stopTokens[0],
                        geometry.target.stopTokens[1],
-                       {penaltyTable, std::span(stateLanes).first(lanes)});
+                       {penaltyTable, std::span(stateLanes).first(lanes)}, tree);
   }
 
   void encodeDraftStateCommitBatch(CommandGraph &graph,
@@ -1851,7 +2136,7 @@ struct Runtime::Impl {
   }
 
   void encodeBatchGdnCommit(CommandGraph &graph,
-                            std::span<Request *const> lanes) {
+                            std::span<Request *const> lanes, bool tree = false) {
     if (lanes.empty() || lanes.size() > kLaneCount)
       throw std::invalid_argument("invalid GDN commit batch");
     const uint32_t width = static_cast<uint32_t>(lanes.size());
@@ -1872,7 +2157,7 @@ struct Runtime::Impl {
          decodeArena->gdnStorage(DecodeTensor::VerifyBetaBase), currentStates,
          nextStates,
          decodeArena->batchSlice(DecodeTensor::RetainedCount, width)},
-        width);
+        width, tree);
   }
 
   // A stop token or the last budgeted token needs no target work of its own:
@@ -1922,6 +2207,7 @@ struct Runtime::Impl {
       if (!laneResult.failure.empty()) {
         // The cycle's state and tokens are not committed; the engine ends
         // the request.
+        entry.resultInvalid = true;
         entry.maskWords.clear();
         entry.verifyMaskInFlight = false;
         results.push_back({.requestId = entry.id,
@@ -1963,6 +2249,37 @@ struct Runtime::Impl {
         emitTerminalAnchor(entry, result);
     }
 
+    if (FILE *f = expTrace()) {
+      for (uint32_t lane = 0; lane < items.size(); ++lane) {
+        const ModelStepResult &r = results[lane];
+        std::fprintf(f, "{\"t\":\"commit\",\"rid\":%llu,\"pos\":%llu,\"width\":%zu,\"rows\":%u,\"accepted\":%u,\"retained\":%u,\"tail\":%d,\"gpu_ms\":%.4f,\"wall_ms\":%.4f",
+                     (unsigned long long)lanes[lane].request->id, (unsigned long long)items[lane].logicalPosition, items.size(),
+                     ops::activeVerifyRows(), lanes[lane].accepted, lanes[lane].retained, int(lanes[lane].request->lookupTail),
+                     timing.gpuSeconds * 1000, timing.wallSeconds * 1000);
+        expTokens(f, "out", r.outputTokens.data(), r.outputTokens.size());
+        // FNV-1a of each retained row's target logits (row i scores position pos+i+1).
+        {
+          const uint32_t rowsNow = ops::activeVerifyRows(), vocabulary = geometry.target.vocabularySize;
+          const uint32_t storage = targetModel.decodeStorageLanes(static_cast<uint32_t>(items.size()));
+          const float *logits = contents<float>(decodeArena->batchSlice(DecodeTensor::Logits, storage), "exp logits") +
+                                uint64_t(lane) * rowsNow * vocabulary;
+          const bool tree = lanes[lane].request->treeCycle;
+          const uint32_t *path = contents<uint32_t>(decodeArena->batchSlice(DecodeTensor::VerifyCandidates,
+                                                    static_cast<uint32_t>(items.size())), "exp path") +
+                                 lane * JUSTFIT_TREE_MAXIMUM_DEPTH;
+          std::fprintf(f, ",\"tree\":%d,\"lh\":[", int(tree));
+          for (uint32_t row = 0; row < lanes[lane].retained; ++row) {
+            uint64_t h = 1469598103934665603ull;
+            const auto *bytes = reinterpret_cast<const unsigned char *>(logits + uint64_t(tree ? path[row] : row) * vocabulary);
+            for (uint64_t i = 0; i < uint64_t(vocabulary) * sizeof(float); ++i) h = (h ^ bytes[i]) * 1099511628211ull;
+            std::fprintf(f, row ? ",\"%016llx\"" : "\"%016llx\"", (unsigned long long)h);
+          }
+          std::fputc(']', f);
+        }
+        std::fputs("}\n", f);
+      }
+      std::fflush(f);
+    }
     counters.lastDecodeGpuSeconds = timing.gpuSeconds;
     counters.totalDecodeGpuSeconds += timing.gpuSeconds;
     counters.lastDecodeWallSeconds = timing.wallSeconds;
@@ -2002,11 +2319,40 @@ struct Runtime::Impl {
       addTiming(command_.wait());
       const auto started=AwakeClock::now();
       const uint32_t width=static_cast<uint32_t>(lanes_.size());
-      const uint32_t rows=lanes_.front().request->verifyRows;
+      uint32_t rows=lanes_.front().request->verifyRows;
       std::array<std::array<uint32_t,7>,4> learned{};
       { ops::VerifyShapeScope draftShape(8);
         for(uint32_t lane=0;lane<width;++lane)
           std::copy_n(contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::ProposedTokens),"draft"),7,learned[lane].begin());
+        if(FILE *f=expTrace()) for(uint32_t lane=0;lane<width;++lane) {
+          const auto &entry=*lanes_[lane].request;
+          std::fprintf(f,"{\"t\":\"draft\",\"rid\":%llu,\"pos\":%llu,\"width\":%u,\"anchor\":%u",
+            (unsigned long long)entry.id,(unsigned long long)items_[lane].logicalPosition,width,*entry.pendingToken);
+          expTokens(f,"learned",learned[lane].data(),7);
+          // Selector scores: candidate score = unary + edge(chosen predecessor -> candidate), draft_select_dflash.
+          expFloats(f,"unary",contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::Unary,width),"exp unary")+lane*7*JUSTFIT_DRAFT_CANDIDATES,7*JUSTFIT_DRAFT_CANDIDATES);
+          expFloats(f,"edges",contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::TopPartialValues,width),"exp edges")
+                    +uint64_t(width)*7*JUSTFIT_DRAFT_SAMPLING_SHARDS*JUSTFIT_DRAFT_CANDIDATES+uint64_t(lane)*7*JUSTFIT_DRAFT_CANDIDATES*JUSTFIT_DRAFT_CANDIDATES,
+                    7*JUSTFIT_DRAFT_CANDIDATES*JUSTFIT_DRAFT_CANDIDATES);
+          expTokens(f,"cand",contents<uint32_t>(impl_.decodeArena->batchSlice(DecodeTensor::Candidates,width),"exp candidates b")+lane*7*JUSTFIT_DRAFT_CANDIDATES,7*JUSTFIT_DRAFT_CANDIDATES);
+          std::fputs("}\n",f);
+        }
+      }
+      if(lanes_.front().request->treeCycle && rows==16 && !Impl::treeOverLookup()) {
+        // A span the prompt lookup extends past the draft verifies as the
+        // lookup chain of 16 rows, for every lane of the batch.
+        bool span=false;
+        for(uint32_t lane=0;lane<width;++lane) {
+          const auto &entry=*lanes_[lane].request;
+          auto history=entry.lookupHistory;history.push_back(*entry.pendingToken);
+          auto proposal=lookupProposal(history,learned[lane]);
+          span|=retainDraftHead(proposal.tokens,learned[lane]);
+        }
+        if(span) for(uint32_t lane=0;lane<width;++lane) lanes_[lane].request->treeCycle=false;
+      }
+      if(lanes_.front().request->treeCycle) {
+        if(advanceTree(width,rows,started)) return;
+        rows=lanes_.front().request->verifyRows;
       }
       ops::VerifyShapeScope shape(rows);
       std::array<Request*,4> entries{};
@@ -2061,6 +2407,136 @@ struct Runtime::Impl {
       verified_=true;
       timing_.wallSeconds+=std::chrono::duration<double>(AwakeClock::now()-started).count();
     }
+    // Experiment (JUSTFIT_TREE): each lane's draft tree in its verify rows,
+    // verified with the tree kernels; the accepted path is gathered to the
+    // chain's rows before the commits (metal/abi/TreeVerify.h).
+    // False when the cycle takes the chain after all (adaptive rows).
+    bool advanceTree(uint32_t width,uint32_t rows,AwakeClock::time_point started) {
+      if(width>2) throw std::logic_error("tree verify takes at most two lanes");
+      JustFitTreeBatch tree{};
+      // Sampled lanes (JUSTFIT_TREE_SAMPLED): the tree keeps the draft's
+      // sampled chain as its rows 0 .. 7; the chain's candidates and
+      // probabilities feed the residual draws and the acceptance test.
+      uint32_t samplingMask=0;
+      std::array<uint32_t,2> chainRows{};
+      std::array<std::array<float,JUSTFIT_TREE_MAXIMUM_DEPTH>,2> chainQ{};
+      std::array<std::array<uint32_t,JUSTFIT_DRAFT_PROPOSAL_TOKENS>,2> chainPicks{};
+      std::array<std::vector<uint32_t>,2> chainIds;
+      std::array<std::vector<float>,2> chainProbs;
+      for(uint32_t lane=0;lane<width;++lane)
+        if(Impl::samplingPolicy(*lanes_[lane].request).samples()) samplingMask|=1u<<lane;
+      {
+        ops::VerifyShapeScope draftShape(8);
+        const auto *candidates=contents<uint32_t>(impl_.decodeArena->batchSlice(DecodeTensor::Candidates,width),"tree candidates");
+        for(uint32_t lane=0;lane<width;++lane) {
+          if(!(samplingMask&(1u<<lane))) continue;
+          const auto *ids=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::Candidates),"chain candidates");
+          const auto *probs=contents<float>(impl_.decodeArena->get(lane,DecodeTensor::ProposalProbs),"chain probabilities");
+          const auto *proposed=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::ProposedTokens),"chain tokens");
+          constexpr uint32_t C=JUSTFIT_DRAFT_CANDIDATES;
+          chainIds[lane].assign(ids,ids+JUSTFIT_DRAFT_PROPOSAL_TOKENS*C);
+          chainProbs[lane].assign(probs,probs+JUSTFIT_DRAFT_PROPOSAL_TOKENS*C);
+          for(uint32_t p=0;p<JUSTFIT_DRAFT_PROPOSAL_TOKENS;++p) {
+            uint32_t pick=C;
+            for(uint32_t j=0;j<C && pick==C;++j) if(ids[p*C+j]==proposed[p]) pick=j;
+            if(pick==C) {
+              // A sampled proposal outside its candidates: the chain verifies.
+              for(uint32_t other=0;other<width;++other) lanes_[other].request->treeCycle=false;
+              return false;
+            }
+            chainPicks[lane][p]=pick;
+            chainQ[lane][p]=probs[p*C+pick];
+          }
+          chainRows[lane]=JUSTFIT_DRAFT_PROPOSAL_TOKENS+1;
+        }
+        const auto *unary=contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::Unary,width),"tree unary");
+        const auto *edges=contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::TopPartialValues,width),"tree edges")
+                          +uint64_t(width)*JUSTFIT_DRAFT_PROPOSAL_TOKENS*JUSTFIT_DRAFT_SAMPLING_SHARDS*JUSTFIT_DRAFT_CANDIDATES;
+        constexpr uint64_t lanePositions=uint64_t(JUSTFIT_DRAFT_PROPOSAL_TOKENS)*JUSTFIT_DRAFT_CANDIDATES;
+        const auto build=[&](uint32_t lane,uint32_t treeRows,double *expected,double *chainExpected=nullptr) {
+          return buildDraftTree(candidates+lane*lanePositions,unary+lane*lanePositions,
+                                edges+lane*lanePositions*JUSTFIT_DRAFT_CANDIDATES,
+                                *lanes_[lane].request->pendingToken,treeRows,expected,chainExpected,
+                                (samplingMask&(1u<<lane))?chainPicks[lane].data():nullptr);
+        };
+        if(rows==16 && Impl::treeAdaptive() && !samplingMask) {
+          // The batch takes the chain, an 8-row or a 16-row tree, whichever
+          // its expected tokens per cycle time favour. A tree cycle costs
+          // JUSTFIT_TREE_OVERHEAD more than the chain of its rows.
+          double chain=0,small=0,large=0;
+          for(uint32_t lane=0;lane<width;++lane) {
+            double e8=0,e16=0,ec=0;
+            build(lane,8,&e8,&ec);build(lane,16,&e16,nullptr);
+            chain+=1+ec;small+=1+e8;large+=1+e16;
+          }
+          uint64_t context=0;
+          for(uint32_t lane=0;lane<width;++lane) context=std::max(context,items_[lane].logicalPosition);
+          const double overhead=Impl::treeOverhead();
+          const double perSmall=small/overhead,perLarge=large/(overhead*Impl::treeCost16(width,context));
+          if(chain>=perSmall && chain>=perLarge) {
+            // The 8-row chain: advance() verifies the draft's chain as without trees.
+            for(uint32_t lane=0;lane<width;++lane) {
+              lanes_[lane].request->treeCycle=false;
+              lanes_[lane].request->verifyRows=8;
+              lanes_[lane].maximumRetained=std::min(lanes_[lane].maximumRetained,8u);
+            }
+            return false;
+          }
+          if(perLarge<=perSmall) {
+            rows=8;
+            for(uint32_t lane=0;lane<width;++lane) lanes_[lane].request->verifyRows=8;
+          }
+        }
+        for(uint32_t lane=0;lane<width;++lane) tree.lane[lane]=build(lane,rows,nullptr);
+      }
+      ops::VerifyShapeScope shape(rows);
+      std::array<Request*,4> entries{};
+      std::array<uint32_t,4> limits{};
+      for(uint32_t lane=0;lane<width;++lane) {
+        auto &entry=*lanes_[lane].request;
+        // A tree accepts at most its depth: the anchor and seven draft tokens.
+        lanes_[lane].maximumRetained=std::min(lanes_[lane].maximumRetained,JUSTFIT_TREE_MAXIMUM_DEPTH);
+        entries[lane]=&entry;limits[lane]=lanes_[lane].maximumRetained;
+        entry.lookupTail=false;
+        const JustFitTreeLane &t=tree.lane[lane];
+        if(samplingMask&(1u<<lane)) {
+          // The draws of rows 0 .. 6 follow the chain: its candidates at the
+          // verify positions, as a 16-row lookup cycle stores them.
+          auto *ids=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::VerifyCandidates),"tree verify candidates");
+          auto *prob=contents<float>(impl_.decodeArena->get(lane,DecodeTensor::VerifyProbabilities),"tree verify probabilities");
+          std::copy(chainIds[lane].begin(),chainIds[lane].end(),ids);
+          std::copy(chainProbs[lane].begin(),chainProbs[lane].end(),prob);
+        }
+        auto *input=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::InputTokens),"tree input");
+        auto *pos=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::Positions),"tree positions");
+        auto *draftPos=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::DraftPositions),"tree draft positions");
+        for(uint32_t row=0;row<rows;++row) {
+          const bool node=row<t.rows;
+          input[row]=row==0?*entry.pendingToken:std::min(node?t.token[row]:0u,impl_.geometry.target.vocabularySize-1);
+          const auto rotary=impl_.ropePosition(entry,items_[lane].logicalPosition+(node?t.depth[row]:0u));
+          std::copy(rotary.begin(),rotary.end(),pos+row*3);
+          // The draft commits the gathered rows, the chain's.
+          draftPos[row]=static_cast<uint32_t>(items_[lane].logicalPosition+row);
+        }
+      }
+      CommandGraph graph;
+      const auto d=[&](DecodeTensor tensor){return impl_.decodeArena->batchSlice(tensor,width);};
+      impl_.addRopeTables(graph,d(DecodeTensor::Positions),width*rows,d(DecodeTensor::DraftPositions),width*rows,
+        d(DecodeTensor::RopeCos),d(DecodeTensor::RopeSin),d(DecodeTensor::DraftRopeCos),d(DecodeTensor::DraftRopeSin));
+      impl_.encodeBatchEmbedding(graph,DecodeTensor::InputTokens,DecodeTensor::Hidden0,width);
+      const std::span<Request*const> requests(entries.data(),width);
+      impl_.encodeTargetVerifyBatchForward(graph,requests,items_,&tree);
+      impl_.encodeTargetVerifyBatchPolicy(graph,requests,samplingMask!=0);
+      impl_.encodeTreeAcceptance(graph,width,{limits.data(),width},tree,samplingMask,chainRows,chainQ);
+      impl_.encodeTreeGathers(graph,width);
+      impl_.encodeBatchGdnCommit(graph,requests,true);
+      impl_.encodeTargetVerifyBatchForward(graph,requests,items_,nullptr,true);
+      impl_.encodeDraftStateCommitBatch(graph,requests,items_);
+      command_=impl_.backend.submitCommandAsync(graph.dispatches(),wake_);
+      verified_=true;
+      timing_.wallSeconds+=std::chrono::duration<double>(AwakeClock::now()-started).count();
+      return true;
+    }
     Impl &impl_;
     std::vector<DecodeLaneResult> lanes_;
     std::vector<ModelBatchItem> items_;
@@ -2086,36 +2562,69 @@ struct Runtime::Impl {
       std::vector<ModelMaskRequest> requests;
       if (stage_ == Stage::Draft && command_.ready()) {
         addTiming(command_.wait());
+        if (lanes_.front().request->treeCycle) planTree();
         std::array<Request *, kLaneCount> entries{};
         for (uint32_t lane = 0; lane < lanes_.size(); ++lane) {
           DecodeLaneResult &laneResult = lanes_[lane];
           Request &entry = *laneResult.request;
+          entries[lane] = &entry;
+          if (!constrained(lane)) continue;
           const uint32_t *proposed = contents<uint32_t>(
               impl_.decodeArena->get(lane, DecodeTensor::ProposedTokens),
               "constrained draft proposals");
+          if (FILE *f = expTrace()) {
+            // Experiment: the constrained lane's draft, as the lookup ticket traces it.
+            ops::VerifyShapeScope draftShape(8);
+            const uint32_t width = static_cast<uint32_t>(lanes_.size());
+            std::fprintf(f, "{\"t\":\"draft\",\"rid\":%llu,\"pos\":%llu,\"width\":%u,\"anchor\":%u,\"constrained\":1",
+                         (unsigned long long)entry.id, (unsigned long long)items_[lane].logicalPosition, width, *entry.pendingToken);
+            expTokens(f, "learned", proposed, 7);
+            expFloats(f, "unary", contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::Unary, width), "exp unary") + lane * 7 * JUSTFIT_DRAFT_CANDIDATES, 7 * JUSTFIT_DRAFT_CANDIDATES);
+            expFloats(f, "edges", contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::TopPartialValues, width), "exp edges")
+                      + uint64_t(width) * 7 * JUSTFIT_DRAFT_SAMPLING_SHARDS * JUSTFIT_DRAFT_CANDIDATES + uint64_t(lane) * 7 * JUSTFIT_DRAFT_CANDIDATES * JUSTFIT_DRAFT_CANDIDATES,
+                      7 * JUSTFIT_DRAFT_CANDIDATES * JUSTFIT_DRAFT_CANDIDATES);
+            expTokens(f, "cand", contents<uint32_t>(impl_.decodeArena->batchSlice(DecodeTensor::Candidates, width), "exp candidates b") + lane * 7 * JUSTFIT_DRAFT_CANDIDATES, 7 * JUSTFIT_DRAFT_CANDIDATES);
+            std::fputs("}\n", f);
+          }
           entry.maskWords.clear();
           entry.verifyMaskInFlight = true;
-          entries[lane] = &entry;
 
           if (!abandoned_[lane]) {
             ModelMaskRequest request;
             request.requestId = entry.id;
-            request.simulationTokens.reserve(kDecodeRows);
-            request.simulationTokens.push_back(*entry.pendingToken);
-            request.simulationTokens.insert(request.simulationTokens.end(),
-                                            proposed,
-                                            proposed + kDraftProposalTokens);
+            if (tree_) {
+              // The tree's rows (row 0 the anchor) and their parents.
+              const JustFitTreeLane &t = tree_->lane[lane];
+              request.simulationTokens.assign(t.token, t.token + t.rows);
+              request.simulationParents.assign(t.parent, t.parent + t.rows);
+            } else {
+              request.simulationTokens.reserve(kDecodeRows);
+              request.simulationTokens.push_back(*entry.pendingToken);
+              request.simulationTokens.insert(request.simulationTokens.end(),
+                                              proposed,
+                                              proposed + kDraftProposalTokens);
+            }
             requests.push_back(std::move(request));
           }
         }
 
         CommandGraph target;
         const uint32_t width = static_cast<uint32_t>(lanes_.size());
-        impl_.encodeBatchVerifyInput(target, width);
-        impl_.encodeBatchEmbedding(target, DecodeTensor::InputTokens,
-                                   DecodeTensor::Hidden0, width);
-        impl_.encodeTargetVerifyBatchForward(
-            target, {entries.data(), lanes_.size()}, items_);
+        if (tree_) {
+          ops::VerifyShapeScope shape(rows_);
+          prepareTreeInputs();
+          const auto d=[&](DecodeTensor tensor){return impl_.decodeArena->batchSlice(tensor,width);};
+          impl_.addRopeTables(target,d(DecodeTensor::Positions),width*rows_,d(DecodeTensor::DraftPositions),width*rows_,
+            d(DecodeTensor::RopeCos),d(DecodeTensor::RopeSin),d(DecodeTensor::DraftRopeCos),d(DecodeTensor::DraftRopeSin));
+          impl_.encodeBatchEmbedding(target, DecodeTensor::InputTokens, DecodeTensor::Hidden0, width);
+          impl_.encodeTargetVerifyBatchForward(target, {entries.data(), lanes_.size()}, items_, &*tree_);
+        } else {
+          impl_.encodeBatchVerifyInput(target, width);
+          impl_.encodeBatchEmbedding(target, DecodeTensor::InputTokens,
+                                     DecodeTensor::Hidden0, width);
+          impl_.encodeTargetVerifyBatchForward(
+              target, {entries.data(), lanes_.size()}, items_);
+        }
         submit(target);
         stage_ = Stage::TargetForward;
       }
@@ -2131,10 +2640,11 @@ struct Runtime::Impl {
       if (stage_ == Stage::WaitingMask) {
         bool masksReady = true;
         for (uint32_t lane = 0; lane < lanes_.size(); ++lane) {
-          masksReady = masksReady && (abandoned_[lane] ||
+          masksReady = masksReady && (!constrained(lane) || abandoned_[lane] ||
                                       !lanes_[lane].request->maskWords.empty());
         }
         if (masksReady) {
+          ops::VerifyShapeScope shape(rows_);
           maskWaitSeconds_ +=
               std::chrono::duration<double>(AwakeClock::now() - *maskWaitStarted_)
                   .count();
@@ -2146,6 +2656,7 @@ struct Runtime::Impl {
             Request &entry = *laneResult.request;
             entries[lane] = &entry;
             maximumRetained[lane] = laneResult.maximumRetained;
+            if (!constrained(lane)) continue;
             if (abandoned_[lane])
               impl_.admitEveryToken(lane);
             else
@@ -2153,13 +2664,20 @@ struct Runtime::Impl {
           }
 
           CommandGraph commit;
-          impl_.encodeTargetVerifyBatchPolicy(commit,
-                                              {entries.data(), lanes_.size()});
-          impl_.encodeBatchAcceptance(commit, {entries.data(), lanes_.size()},
-                                      {maximumRetained.data(), lanes_.size()});
-          impl_.encodeBatchGdnCommit(commit, {entries.data(), lanes_.size()});
-          impl_.encodeDraftStateCommitBatch(
-              commit, {entries.data(), lanes_.size()}, items_);
+          const std::span<Request *const> requests(entries.data(), lanes_.size());
+          impl_.encodeTargetVerifyBatchPolicy(commit, requests);
+          if (tree_) {
+            const uint32_t width = static_cast<uint32_t>(lanes_.size());
+            impl_.encodeTreeAcceptance(commit, width, {maximumRetained.data(), width}, *tree_);
+            impl_.encodeTreeGathers(commit, width);
+            impl_.encodeBatchGdnCommit(commit, requests, true);
+            impl_.encodeTargetVerifyBatchForward(commit, requests, items_, nullptr, true);
+          } else {
+            impl_.encodeBatchAcceptance(commit, requests,
+                                        {maximumRetained.data(), lanes_.size()});
+            impl_.encodeBatchGdnCommit(commit, requests);
+          }
+          impl_.encodeDraftStateCommitBatch(commit, requests, items_);
           submit(commit);
           stage_ = Stage::Commit;
         }
@@ -2170,10 +2688,9 @@ struct Runtime::Impl {
     bool ownsMaskWait(uint64_t requestId) const noexcept override {
       if (stage_ == Stage::Draft || stage_ == Stage::Done)
         return false;
-      return std::any_of(lanes_.begin(), lanes_.end(),
-                         [requestId](const DecodeLaneResult &lane) {
-                           return lane.request->id == requestId;
-                         });
+      for (uint32_t lane = 0; lane < lanes_.size(); ++lane)
+        if (lanes_[lane].request->id == requestId) return constrained(lane);
+      return false;
     }
 
     void abandonMask(uint64_t requestId) noexcept override {
@@ -2199,13 +2716,15 @@ struct Runtime::Impl {
       stage_ = Stage::Done;
       ModelTelemetry &counters = impl_.counters;
       ++counters.constrainedMaskOverlapBatches;
-      counters.constrainedMaskOverlapRequests += lanes_.size();
+      for (uint32_t lane = 0; lane < lanes_.size(); ++lane)
+        counters.constrainedMaskOverlapRequests += constrained(lane);
       counters.lastConstrainedTargetForwardGpuSeconds =
           targetForwardGpuSeconds_;
       counters.totalConstrainedTargetForwardGpuSeconds +=
           targetForwardGpuSeconds_;
       counters.lastConstrainedMaskWaitSeconds = maskWaitSeconds_;
       counters.totalConstrainedMaskWaitSeconds += maskWaitSeconds_;
+      ops::VerifyShapeScope shape(rows_);
       return impl_.finalizeDecode(lanes_, items_, timing_);
     }
 
@@ -2214,6 +2733,9 @@ struct Runtime::Impl {
     }
 
   private:
+    bool constrained(uint32_t lane) const noexcept {
+      return lanes_[lane].request->constraint == ConstraintMode::TokenMask;
+    }
     enum class Stage : uint8_t {
       Draft,
       TargetForward,
@@ -2242,6 +2764,78 @@ struct Runtime::Impl {
     double maskWaitSeconds_ = 0.0;
     std::optional<AwakeClock::time_point> maskWaitStarted_;
     std::function<void()> wake_;
+    // Experiment (JUSTFIT_TREE_CONSTRAINED): this cycle's trees and rows.
+    std::optional<JustFitTreeBatch> tree_;
+    uint32_t rows_ = kDecodeRows;
+
+    // LookupDecodeTicket::advanceTree's tree choice for this batch: the
+    // chain, an 8-row or a 16-row tree by expected tokens per cycle time.
+    void planTree() {
+      const uint32_t width = static_cast<uint32_t>(lanes_.size());
+      ops::VerifyShapeScope draftShape(8);
+      const auto *candidates=contents<uint32_t>(impl_.decodeArena->batchSlice(DecodeTensor::Candidates,width),"tree candidates");
+      const auto *unary=contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::Unary,width),"tree unary");
+      const auto *edges=contents<float>(impl_.decodeArena->batchSlice(DecodeTensor::TopPartialValues,width),"tree edges")
+                        +uint64_t(width)*JUSTFIT_DRAFT_PROPOSAL_TOKENS*JUSTFIT_DRAFT_SAMPLING_SHARDS*JUSTFIT_DRAFT_CANDIDATES;
+      constexpr uint64_t lanePositions=uint64_t(JUSTFIT_DRAFT_PROPOSAL_TOKENS)*JUSTFIT_DRAFT_CANDIDATES;
+      const auto build=[&](uint32_t lane,uint32_t treeRows,double *expected,double *chainExpected=nullptr) {
+        return buildDraftTree(candidates+lane*lanePositions,unary+lane*lanePositions,
+                              edges+lane*lanePositions*JUSTFIT_DRAFT_CANDIDATES,
+                              *lanes_[lane].request->pendingToken,treeRows,expected,chainExpected);
+      };
+      uint32_t rows=16;
+      if(Impl::treeAdaptive()) {
+        double chain=0,small=0,large=0;
+        for(uint32_t lane=0;lane<width;++lane) {
+          double e8=0,e16=0,ec=0;
+          build(lane,8,&e8,&ec);build(lane,16,&e16,nullptr);
+          chain+=1+ec;small+=1+e8;large+=1+e16;
+        }
+        uint64_t context=0;
+        for(uint32_t lane=0;lane<width;++lane) context=std::max(context,items_[lane].logicalPosition);
+        const double overhead=Impl::treeOverhead();
+        const double perSmall=small/overhead,perLarge=large/(overhead*Impl::treeCost16(width,context));
+        if(chain>=perSmall && chain>=perLarge) {
+          for(auto &laneResult:lanes_) {
+            laneResult.request->treeCycle=false;
+            laneResult.request->verifyRows=8;
+            laneResult.maximumRetained=std::min(laneResult.maximumRetained,8u);
+          }
+          return;
+        }
+        if(perLarge<=perSmall) rows=8;
+      } else {
+        rows=Impl::treeRows();
+      }
+      JustFitTreeBatch tree{};
+      for(uint32_t lane=0;lane<width;++lane) tree.lane[lane]=build(lane,rows,nullptr);
+      for(auto &laneResult:lanes_) {
+        laneResult.request->verifyRows=rows;
+        // A tree accepts at most its depth: the anchor and seven draft tokens.
+        laneResult.maximumRetained=std::min(laneResult.maximumRetained,JUSTFIT_TREE_MAXIMUM_DEPTH);
+        laneResult.request->lookupTail=false;
+      }
+      tree_=tree;rows_=rows;
+    }
+
+    // The tree rows' input tokens, positions (logical + depth) and draft
+    // positions (the gathered chain rows'), as advanceTree writes them.
+    void prepareTreeInputs() {
+      for(uint32_t lane=0;lane<lanes_.size();++lane) {
+        auto &entry=*lanes_[lane].request;
+        const JustFitTreeLane &t=tree_->lane[lane];
+        auto *input=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::InputTokens),"tree input");
+        auto *pos=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::Positions),"tree positions");
+        auto *draftPos=contents<uint32_t>(impl_.decodeArena->get(lane,DecodeTensor::DraftPositions),"tree draft positions");
+        for(uint32_t row=0;row<rows_;++row) {
+          const bool node=row<t.rows;
+          input[row]=row==0?*entry.pendingToken:std::min(node?t.token[row]:0u,impl_.geometry.target.vocabularySize-1);
+          const auto rotary=impl_.ropePosition(entry,items_[lane].logicalPosition+(node?t.depth[row]:0u));
+          std::copy(rotary.begin(),rotary.end(),pos+row*3);
+          draftPos[row]=static_cast<uint32_t>(items_[lane].logicalPosition+row);
+        }
+      }
+    }
   };
 };
 
@@ -2286,8 +2880,7 @@ void Runtime::suspend(uint64_t requestId) {
   if (!entry.resident || entry.verifyMaskInFlight) {
     throw std::logic_error("Qwen request cannot be suspended");
   }
-  impl_->states.releaseLane(entry.stateLane, requestId);
-  impl_->pageTableBindings[entry.stateLane] = {};
+  impl_->releaseLane(entry);
   impl_->releaseImages(entry);
   entry.draftContextPlan.reset();
   entry.replayingGeneration |= entry.promptComplete;
@@ -2465,7 +3058,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
       impl_->aneFfn->restore();
     impl_->aneFfn->begin();
   }
-  const auto captures = impl_->encodeRaggedPrefillGraph(graph, items, entries);
+  const auto outputs = impl_->encodeRaggedPrefillGraph(graph, items, entries);
   const bool encodesImages = std::any_of(
       entries.begin(), entries.begin() + items.size(), [](const auto *entry) {
         return std::any_of(entry->images.begin(), entry->images.end(),
@@ -2476,7 +3069,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
   std::vector<ModelBatchItem> copiedItems(items.begin(), items.end());
 
   Impl *impl = impl_.get();
-  auto finish = [impl, entries, captures, draws,
+  auto finish = [impl, entries, outputs, draws,
                  items = std::move(copiedItems)](CommandTiming &timing) mutable {
     // A chunk whose Neural Engine work failed holds no usable outputs, and
     // the split has stopped: the GPU runs the chunk again alone, which
@@ -2501,7 +3094,17 @@ Runtime::prefillAsync(const BatchPlan &plan,
       timing.wallSeconds += rerun.wallSeconds;
       ++impl->counters.aneFfnReruns;
     }
+    // A row that is not finite, of the chunk or of the state it computed
+    // from, reaches the lane's last row through the recurrent state, and
+    // through attention on a GPU whose tile weighs non-finite keys and values
+    // (some families' tiles give them zero weight, for every reader). Such a
+    // lane commits nothing of the chunk.
+    std::array<bool, kLaneCount> finite{};
+    for (uint32_t lane = 0; lane < items.size(); ++lane)
+      finite[lane] = Impl::finiteRow(outputs.lastRows[lane]);
     for (uint32_t lane = 0; lane < items.size(); ++lane) {
+      if (!finite[lane])
+        continue;
       const uint64_t chunkEnd = items[lane].logicalPosition + items[lane].tokenCount;
       for (Impl::ImageState &image : entries[lane]->images) {
         if (!image.rows)
@@ -2520,6 +3123,15 @@ Runtime::prefillAsync(const BatchPlan &plan,
         }
       }
     }
+    // The images the command encoded for those lanes alone stay to be
+    // encoded again by their next use.
+    for (uint32_t lane = 0; lane < items.size(); ++lane) {
+      if (finite[lane])
+        continue;
+      for (Impl::ImageState &image : entries[lane]->images)
+        if (image.rows && image.rows->encoding)
+          image.rows->encoding = false;
+    }
 
     impl->releaseIdleVisionWeights();
     std::vector<ModelStepResult> results;
@@ -2528,6 +3140,14 @@ Runtime::prefillAsync(const BatchPlan &plan,
       Impl::Request &entry = *entries[lane];
       const ModelBatchItem &item = items[lane];
       const uint64_t nextLength = item.logicalPosition + item.tokenCount;
+      if (!finite[lane]) {
+        // The chunk's state is not committed; the engine ends the request.
+        entry.resultInvalid = true;
+        results.push_back({.requestId = entry.id,
+                           .consumedPromptTokens = item.tokenCount,
+                           .failure = "target prefill row is not finite"});
+        continue;
+      }
       // The anchor this chunk selects when it completes a generation prompt.
       std::optional<uint32_t> selected;
       if (nextLength == entry.promptTokens && !entry.replayingGeneration &&
@@ -2537,6 +3157,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
             !failure.empty()) {
           // The chunk's state is not committed; the engine ends the
           // request.
+          entry.resultInvalid = true;
           results.push_back({.requestId = entry.id,
                              .consumedPromptTokens = item.tokenCount,
                              .failure = std::move(failure)});
@@ -2546,7 +3167,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
       impl->states.swapParity(entry.stateLane);
       QwenLogicalLengths lengths = impl->states.metadata(entry.stateLane).lengths;
       lengths.targetTokens = nextLength;
-      for (const DispatchDraftCaptureSpan &capture : captures[lane]) {
+      for (const DispatchDraftCaptureSpan &capture : outputs.captures[lane]) {
         lengths = Impl::advanceDraftContext(lengths, nextLength,
                                             capture.absoluteBegin,
                                             capture.absoluteEnd,
@@ -2559,7 +3180,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
       }
       impl->counters.targetPrefillRows += item.tokenCount;
       impl->counters.draftContextRowsAvoided +=
-          item.tokenCount - Impl::captureRows(captures[lane]);
+          item.tokenCount - Impl::captureRows(outputs.captures[lane]);
       impl->states.updateLengths(entry.stateLane, lengths);
       entry.promptComplete = nextLength == entry.promptTokens;
       ModelStepResult result{entry.id, item.tokenCount, {}, false,
@@ -2581,6 +3202,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
               // before cache publication or output and the batch survives.
               result.scoreLogits.clear();
               result.failure = "score logit is not finite";
+              entry.resultInvalid = true;
               break;
             }
             result.scoreLogits.push_back(logit);
@@ -2654,6 +3276,11 @@ Runtime::decodeAsync(const BatchPlan &plan,
     return impl_->submitInitialSelection(items, std::move(completion));
   }
 
+  const bool hasMasks = std::ranges::any_of(items, [&](const auto &item) {
+    return impl_->request(item.requestId).constraint == ConstraintMode::TokenMask;
+  });
+  if (hasMasks != constrained)
+    throw std::invalid_argument("decode plan must flag any constrained lane");
   ops::VerifyShapeScope draftShape(8);
   const uint32_t width = static_cast<uint32_t>(items.size());
   const char *lookupOption=std::getenv("JUSTFIT_LOOKUP");
@@ -2666,8 +3293,30 @@ Runtime::decodeAsync(const BatchPlan &plan,
     if(lookup && wide) { anyWide=true; ++wideLanes; }
     if(!lookup) entry.lookupTail=false;
   }
-  const uint32_t rows=lookupBatchRows(width,lookup,anyWide);
-  for(const auto &item:items) impl_->request(item.requestId).verifyRows=rows;
+  // Experiment: JUSTFIT_EXP_FORCE16=1 takes the existing 16-row verify on every eligible cycle.
+  uint32_t rows=lookupBatchRows(width,lookup,anyWide||(std::getenv("JUSTFIT_EXP_FORCE16")!=nullptr));
+  // Experiment: JUSTFIT_TREE=1 verifies greedy, unpenalized lanes' draft trees
+  // of JUSTFIT_TREE_ROWS (8 or 16) rows on the TQ4 rotated coalesced verify.
+  const bool treeShape=width<=2 && impl_->geometry.target.ffnKind == QwenFfnKind::Dense &&
+                       impl_->geometry.target.kvLayout.format == kv::Format::TQ4;
+  bool tree=(lookup || (constrained && Impl::treeConstrained() && treeShape)) && Impl::treeEnabled();
+  for(const auto &item:items) {
+    const ops::SamplingPolicy policy=Impl::samplingPolicy(impl_->request(item.requestId));
+    // JUSTFIT_TREE_SAMPLED=1: sampled lanes verify 16-row trees around the
+    // draft's sampled chain (verify_tree_accept).
+    if(policy.penalties.active()) tree=false;
+    if(policy.samples() && !(Impl::treeSampled() && Impl::treeRows()==16 && !policy.constrained)) tree=false;
+    if(policy.constrained && !Impl::treeConstrained()) tree=false;
+  }
+  // A cycle the prompt lookup widens (a copied span) keeps the lookup chain;
+  // advance() also returns a tree cycle to it when the lookup finds a span.
+  if(tree && anyWide && !Impl::treeOverLookup()) tree=false;
+  if(tree) rows=Impl::treeRows();
+  for(const auto &item:items) {
+    auto &entry=impl_->request(item.requestId);
+    entry.verifyRows=rows;
+    entry.treeCycle=tree;
+  }
   if(std::getenv("JUSTFIT_LOOKUP_TRACE"))
     std::fprintf(stderr,"LOOKUP_BATCH lanes=%u rows=%u policy=any eligible=%u enabled=%u\n",width,rows,wideLanes,unsigned(lookup));
   std::vector<Impl::DecodeLaneResult> lanes(width);
@@ -2677,10 +3326,6 @@ Runtime::decodeAsync(const BatchPlan &plan,
   for (uint32_t lane = 0; lane < width; ++lane) {
     const ModelBatchItem &item = items[lane];
     Impl::Request &entry = impl_->request(item.requestId);
-    if ((entry.constraint == ConstraintMode::TokenMask) != constrained) {
-      throw std::invalid_argument(
-          "request does not belong to the batch's constraint mode");
-    }
     if (entry.decodeStage != DecodeStage::Regular) {
       throw std::logic_error("request decode stage does not match decode plan");
     }
@@ -2693,7 +3338,7 @@ Runtime::decodeAsync(const BatchPlan &plan,
       throw std::logic_error("terminal anchor was not emitted on selection");
     }
 
-    if (constrained && !entry.maskWords.empty())
+    if (!entry.maskWords.empty())
       throw std::logic_error("constrained request has stale mask state");
     if (Impl::samplingEnabled(entry)) {
       Impl::stageSamplingCycle(entry);
@@ -2729,6 +3374,7 @@ Runtime::decodeAsync(const BatchPlan &plan,
       impl_->decodeArena->batchSlice(DecodeTensor::DraftRopeSin, width));
   impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::DraftInputTokens,
                               DecodeTensor::DraftHidden0, width);
+  impl_->draftModel.addMaskRows(commandGraph, impl_->decodeArena->batchSlice(DecodeTensor::DraftHidden0, width), width);
   impl_->encodeDraftBatchGraph(commandGraph, entries,
                                {logicalPositions.data(), width});
   if (constrained) {
@@ -2811,8 +3457,10 @@ Runtime::provideMask(uint64_t requestId, std::span<const uint32_t> words) {
     throw std::logic_error("request is not waiting for a token mask");
   }
   const uint32_t maskWords = impl_->geometry.maskWords();
+  // A tree cycle's masks cover its verify rows (MaskTreeRequest).
+  const uint32_t verifyRows = entry.treeCycle ? entry.verifyRows : kDecodeRows;
   uint64_t expected = entry.verifyMaskInFlight
-                          ? uint64_t{kDecodeRows + 1} * maskWords
+                          ? uint64_t{verifyRows + 1} * maskWords
                           : maskWords;
   // The native loop matches each response's word count to its request.
   if (words.size() != expected) {
@@ -2866,16 +3514,39 @@ void Runtime::endExternalVision() noexcept {
   if (impl_->aneFfn) impl_->aneFfn->resumeAfterVision();
 }
 
+Model::Parked Runtime::park(uint64_t requestId) {
+  impl_->discardPartial(requestId);
+  auto found = impl_->requests.find(requestId);
+  // A lane whose request found a row that is not finite keeps nothing, nor
+  // one whose draft window a restore could not take whole.
+  if (found == impl_->requests.end() || !found->second.resident ||
+      found->second.resultInvalid ||
+      !impl_->states.metadata(found->second.stateLane).lengths.targetTokens ||
+      !impl_->states.metadata(found->second.stateLane)
+           .lengths.hasCompleteDraftWindow(kDraftCacheStride)) {
+    end(requestId);
+    return {};
+  }
+  Impl::Request &entry = found->second;
+  const uint32_t tokens = static_cast<uint32_t>(
+      impl_->states.metadata(entry.stateLane).lengths.targetTokens);
+  std::shared_ptr<const CompositeState> state = impl_->states.park(entry.stateLane, entry.id);
+  impl_->pageTableBindings[entry.stateLane] = {};
+  impl_->releaseImages(entry);
+  impl_->requests.erase(found);
+  impl_->releaseIdlePrefillResources();
+  impl_->releaseIdleVisionWeights();
+  return {std::move(state), tokens};
+}
+
 void Runtime::end(uint64_t requestId) {
   impl_->discardPartial(requestId);
   auto found = impl_->requests.find(requestId);
   if (found == impl_->requests.end())
     return;
   impl_->releaseImages(found->second);
-  if (found->second.resident) {
-    impl_->states.releaseLane(found->second.stateLane, requestId);
-    impl_->pageTableBindings[found->second.stateLane] = {};
-  }
+  if (found->second.resident)
+    impl_->releaseLane(found->second);
   impl_->requests.erase(found);
   impl_->releaseIdlePrefillResources();
   impl_->releaseIdleVisionWeights();
@@ -2883,8 +3554,8 @@ void Runtime::end(uint64_t requestId) {
 
 namespace {
 
-// A warmup step whose lane failed (a non-finite logit row) fails the warmup
-// there, with the lane's reason.
+// A warmup step whose lane failed (a row or logit that is not finite) fails
+// the warmup there, with the lane's reason.
 void requireLanesSucceeded(std::span<const ModelStepResult> results) {
   for (const ModelStepResult &result : results)
     if (!result.failure.empty())

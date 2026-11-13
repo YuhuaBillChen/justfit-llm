@@ -113,9 +113,36 @@ func packageMPSGraphVersion(_ url: URL) -> String? {
 // MARK: - handles ----------------------------------------------------------------------------------------------
 
 final class ModelH {
-    let model: AIModel
+    var model: AIModel?
     let path: String
-    init(model: AIModel, path: String) { self.model = model; self.path = path }
+    let compute: Int32
+    var repaired = false
+    init(model: AIModel, path: String, compute: Int32) {
+        self.model = model; self.path = path; self.compute = compute
+    }
+    func loadFunction(named name: String) throws -> InferenceFunction? {
+        do { return try model?.loadFunction(named: name) }
+        catch {
+            let env = ProcessInfo.processInfo.environment
+            // Only the governed preparation worker may repair its own entry.
+            // A live image worker stays cached-only and can fall back to GPU.
+            guard !repaired, compute == 0, path.hasSuffix(".aimodel"),
+                  env["JUSTFIT_ANE_CACHE_REPAIR"] == "1",
+                  env["JUSTFIT_NATIVE_CACHE_ID"] == "org.justfit.vision.aaa0bdc9ed86239e",
+                  env["CFFIXED_USER_HOME"]?.hasPrefix("/") == true,
+                  String(describing: error) == "nilError" else { throw error }
+            repaired = true
+            let url = URL(fileURLWithPath: path)
+            let options = SpecializationOptions(preferredComputeUnitKind: .neuralEngine)
+            fputs("JUSTFIT_ANE_CACHE_REBUILD " + path + "\n", stderr)
+            model = nil
+            try AIModelCache.default.deleteEntry(for: url, options: options)
+            model = try blocking {
+                try await AIModel.specialize(contentsOf: url, options: options, cachePolicy: .persistent)
+            }
+            return try model?.loadFunction(named: name)
+        }
+    }
 }
 
 struct ValueSpec {
@@ -334,7 +361,7 @@ public func cai_model_load(_ path: UnsafePointer<CChar>, _ compute: Int32, _ che
         default: opts = .default
         }
         let m = try blocking { try await AIModel.specialize(contentsOf: url, options: opts, cachePolicy: .persistent) }
-        return retained(ModelH(model: m, path: p))
+        return retained(ModelH(model: m, path: p, compute: compute))
     } catch {
         fail(err, errcap, error)
         return nil
@@ -346,7 +373,7 @@ public func cai_model_load(_ path: UnsafePointer<CChar>, _ compute: Int32, _ che
 public func cai_model_function_names(_ model: UnsafeMutableRawPointer?, _ buf: UnsafeMutablePointer<CChar>?,
                                      _ cap: Int32) -> Int32 {
     guard let m = try? object(model, ModelH.self) else { return writeCString("", buf, cap) }
-    return writeCString(m.model.functionNames.joined(separator: "\n"), buf, cap)
+    return writeCString((m.model?.functionNames ?? []).joined(separator: "\n"), buf, cap)
 }
 
 @_cdecl("cai_function_load")
@@ -355,8 +382,8 @@ public func cai_function_load(_ model: UnsafeMutableRawPointer?, _ name: UnsafeP
     do {
         let m = try object(model, ModelH.self)
         let n = String(cString: name)
-        guard let f = try m.model.loadFunction(named: n) else {
-            throw BridgeError("no function '\(n)' in \(m.path) (have \(m.model.functionNames))")
+        guard let f = try m.loadFunction(named: n) else {
+            throw BridgeError("no function '\(n)' in \(m.path) (have \(m.model?.functionNames ?? []))")
         }
         return retained(FunctionH(fn: f, model: m, name: n))
     } catch {

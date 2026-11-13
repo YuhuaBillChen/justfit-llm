@@ -22,7 +22,11 @@
   (JUSTFIT_UNIFORM_PROPOSALS + JUSTFIT_DRAFT_PROPOSAL_TOKENS)
 #define JUSTFIT_UNIFORM_CORRECTION                                          \
   (JUSTFIT_UNIFORM_ACCEPTANCE + JUSTFIT_DRAFT_PROPOSAL_TOKENS)
-#define JUSTFIT_SAMPLING_UNIFORMS 24u
+// A sampled tree cycle (JUSTFIT_TREE_SAMPLED) draws verify row r with its own
+// uniform JUSTFIT_UNIFORM_TREE_DRAWS + r: a walk that continues on a branch
+// uses the draws of several rows.
+#define JUSTFIT_UNIFORM_TREE_DRAWS 24u
+#define JUSTFIT_SAMPLING_UNIFORMS 40u
 
 // One target-policy dispatch over lanes of JUSTFIT_TARGET_VERIFY_ROWS logits
 // rows, JUSTFIT_TARGET_VERIFY_ROWS + 1 constraint-mask rows and
@@ -52,10 +56,12 @@ struct TargetSamplingParams {
   uint32_t exclude_stop_mask;
   uint32_t stop_token_0;
   uint32_t stop_token_1;
+  // Nonzero: row r draws uniform JUSTFIT_UNIFORM_TREE_DRAWS + r.
+  uint32_t row_uniforms;
 };
 
-static_assert(sizeof(TargetSamplingParams) == 112,
-              "Target sampling parameters are 112 bytes on both sides");
+static_assert(sizeof(TargetSamplingParams) == 116,
+              "Target sampling parameters are 116 bytes on both sides");
 
 // One shard's share of a sampled row's softmax denominator: the largest
 // logit it admits, the sum of exp((logit - maximum) / temperature) over its
