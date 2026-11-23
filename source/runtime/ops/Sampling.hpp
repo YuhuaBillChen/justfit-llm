@@ -4,6 +4,7 @@
 #include "metal/CommandGraph.hpp"
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/Sampling.h"
+#include "metal/abi/TreeVerify.h"
 #include "metal/MetalBackend.hpp"
 
 #include <cstdint>
@@ -157,7 +158,7 @@ public:
                  std::span<const SamplingPolicy> policies,
                  SamplingBuffers buffers, uint32_t stopToken0,
                  uint32_t stopToken1, const PenaltyTable &penalties,
-                 bool tree = false) const;
+                 bool tree = false, const JustFitTreeBatch *treeBatch = nullptr) const;
   void addAcceptance(
       metal::CommandGraph &graph, AcceptanceBuffers buffers,
       std::span<const uint32_t> maximumRetained,
@@ -183,7 +184,8 @@ private:
   void addPenalties(metal::CommandGraph &graph,
                     std::span<const SamplingPolicy> policies,
                     const SamplingBuffers &buffers, const PenaltyTable &table,
-                    uint32_t rowOffset, bool verify) const;
+                    uint32_t rowOffset, bool verify,
+                    const JustFitTreeBatch *treeBatch = nullptr) const;
   // The parameters that select the rows `rows` names of every lane; throws
   // unless the buffers hold what the selection's kernels reach, before
   // addInitial or addVerify encodes anything.

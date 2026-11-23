@@ -329,10 +329,19 @@ evaluateEngineMemoryPlan(const DeviceCapabilities &device,
   breakdown.minimumRequiredBytes = *required;
   breakdown.minimumDynamicBytes = *required - breakdown.fixedRuntimeBytes;
   // Page ids stay 32-bit. One request's KV capacity is the whole extents of
-  // the size that leaves the fewest of the budget's pages unused.
+  // the size that leaves the fewest of the budget's pages unused. An elastic
+  // prefill arena is loaded from the same budget while that request's prompt
+  // fills its KV, and a next turn holds the parked state it adopts beside its
+  // own lane, so neither is KV room.
+  const uint64_t onePromptBytes =
+      breakdown.laneStateBytes +
+      (model.footprint.elasticPrefill
+           ? model.footprint.runtime.sharedPrefillPlannedAllocatedBytes
+           : 0) +
+      model.footprint.adoptedStateBytes;
   const uint64_t availableForOneRequestKv =
-      breakdown.dynamicBudgetBytes > breakdown.laneStateBytes
-          ? breakdown.dynamicBudgetBytes - breakdown.laneStateBytes
+      breakdown.dynamicBudgetBytes > onePromptBytes
+          ? breakdown.dynamicBudgetBytes - onePromptBytes
           : 0;
   const uint64_t budgetPages =
       std::min<uint64_t>(availableForOneRequestKv / breakdown.kvPageBytes,

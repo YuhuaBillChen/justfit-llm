@@ -22,6 +22,7 @@ pub mod cli_help;
 pub mod replay;
 pub mod cli_platform;
 pub mod cli_serve;
+pub mod cli_launch;
 pub mod serve_options;
 pub mod build_helpers;
 pub mod cli_build;
@@ -43,6 +44,7 @@ pub mod media;
 pub mod native_driver;
 pub mod native_prepare;
 pub mod responses;
+pub mod hosted_tools;
 pub mod tools;
 pub mod tool_arguments;
 pub mod tool_history;
@@ -511,7 +513,8 @@ impl Frontend {
             }
             context[k] = v.clone();
         }
-        let default_effort=self.preparation.default_reasoning_effort.as_ref().map(|s|json!(s));
+        let instant=body["model"].as_str().is_some_and(crate::models::is_instant);
+        let default_effort=if instant{Some(json!("none"))}else{self.preparation.default_reasoning_effort.as_ref().map(|s|json!(s))};
         let effort = body.get("reasoning_effort").filter(|v| !v.is_null()).or(default_effort.as_ref());
         if effort.is_some_and(|v| {
             !v.as_str().is_some_and(|s| {

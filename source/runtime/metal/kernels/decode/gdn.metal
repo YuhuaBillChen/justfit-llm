@@ -143,6 +143,7 @@ inline void gdn_decode_scan(device const float *state_in,
                             device float *state_out,
                             threadgroup GdnDecodeShared<HeadDim> &shared,
                             uint value_head, uint lane, uint simd_group) {
+  (void)state_out;
   constexpr uint Tokens = JUSTFIT_TARGET_VERIFY_ROWS;
   constexpr uint Batches = HeadDim / kDecodeSimdgroups;
   static_assert(Batches % RowsInFlight == 0, "rows in flight tile the head");
@@ -199,7 +200,7 @@ inline void gdn_decode_scan(device const float *state_in,
     }
     for (uint r = 0; r < RowsInFlight; ++r)
       for (uint i = 0; i < 4; ++i) {
-        state_out[base(batch, r) + i] = state[r][i];
+        // Verify emits rows only; commit replays the accepted prefix in place.
         state[r][i] = upcoming[r][i];
       }
   }
@@ -268,8 +269,7 @@ gdn_commit_phase(device const bfloat *packed, device const bfloat *mixed_qkv,
   constexpr uint KeyWidth = KeyHeads * HeadDim;
 
   uint count = retained;
-  if (!ReplayAll && count == JUSTFIT_TARGET_VERIFY_ROWS)
-    return;
+  (void)ReplayAll; // The one-state path always commits every retained row.
   for (uint element = group * 256 + thread_index;
        element < (JUSTFIT_GDN_CONVOLUTION_TAPS - 1) * ConvDim;
        element += ValueHeads * 256) {
@@ -347,7 +347,7 @@ inline void gdn_commit_prefix_batch_phase(
       current + params.convolution_state_bytes +
       ulong(layer) * params.recurrent_layer_bytes);
   device float *state_out = reinterpret_cast<device float *>(
-      next + params.convolution_state_bytes +
+      const_cast<device uchar *>(current) + params.convolution_state_bytes +
       ulong(layer) * params.recurrent_layer_bytes);
   gdn_commit_phase<KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, ReplayAll>(
       packed, mixed_qkv, decay, beta, conv_state_in, conv_state_out, state_in,
@@ -420,9 +420,7 @@ inline void gdn_decode_batch_phase(
   device const float *state_in = reinterpret_cast<device const float *>(
       current + params.convolution_state_bytes +
       ulong(params.layer) * params.recurrent_layer_bytes);
-  device float *state_out = reinterpret_cast<device float *>(
-      next + params.convolution_state_bytes +
-      ulong(params.layer) * params.recurrent_layer_bytes);
+  device float *state_out = nullptr; // no speculative recurrent destination
 
   device bfloat *lane_hidden = gdn_hidden + ulong(batch) * Rows * ValueWidth;
   gdn_decode_prologue<KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth>(
@@ -740,8 +738,39 @@ kernel void verify_gdn_fused_tree(GDN_DECODE_BUFFERS(bfloat),
       decay, beta, gdn_norm_weight, gdn_hidden, params, group, lane, simd_group, shared,
       nullptr, nullptr);
 }
+// The same trees for a GGUF target, whose mixer norms are F32 (Table16 feeds its out-projection).
+kernel void verify_gdn_fused_tree_table16_f32(GDN_DECODE_BUFFERS(float),
+    device bfloat *table [[buffer(17)]], device float *sums [[buffer(18)]],
+    constant GDNTreeDecodeParams &params [[buffer(19)]], GDN_DECODE_THREADS) {
+  threadgroup GdnDecodeShared<128> shared;
+  (void)next0; (void)next1; (void)next2; (void)next3;  // a tree leaves no decoded state
+  gdn_tree_batch_phase<16, 48, 128, 10240, 16640, 2, gguf_sg::Table16, float>(
+      packed, conv_weights, current0, current1, current2, current3, mixed, a_scale, dt_bias,
+      decay, beta, gdn_norm_weight, gdn_hidden, params, group, lane, simd_group, shared, table, sums);
+}
+kernel void verify_gdn_fused_tree_f32(GDN_DECODE_BUFFERS(float),
+    constant GDNTreeDecodeParams &params [[buffer(17)]], GDN_DECODE_THREADS) {
+  threadgroup GdnDecodeShared<128> shared;
+  (void)next0; (void)next1; (void)next2; (void)next3;  // a tree leaves no decoded state
+  gdn_tree_batch_phase<16, 48, 128, 10240, 16640, 2, gguf_sg::Table16, float>(
+      packed, conv_weights, current0, current1, current2, current3, mixed, a_scale, dt_bias,
+      decay, beta, gdn_norm_weight, gdn_hidden, params, group, lane, simd_group, shared,
+      nullptr, nullptr);
+}
 #undef GDN_DECODE_ENTRY
 #undef GDN_DECODE_TABLE_ENTRY
 #undef GDN_DECODE_BODY
 #undef GDN_DECODE_THREADS
 #undef GDN_DECODE_BUFFERS
+
+// All target/acceptance work and all recurrent writes have completed before
+// this separate dispatch copies the non-aliased carried convolution.
+kernel void gdn_finish_commit(
+ device uchar *current0 [[buffer(0)]],device uchar *current1 [[buffer(1)]],device uchar *current2 [[buffer(2)]],device uchar *current3 [[buffer(3)]],
+ device const uchar *next0 [[buffer(4)]],device const uchar *next1 [[buffer(5)]],device const uchar *next2 [[buffer(6)]],device const uchar *next3 [[buffer(7)]],
+ constant GDNBatchCommitParams &params [[buffer(8)]],uint2 gid [[thread_position_in_grid]]) {
+ if(ulong(gid.x)>=params.convolution_state_bytes/4)return;
+ device uchar *current=JUSTFIT_LANE_BINDING(gid.y,current0,current1,current2,current3);
+ device const uchar *next=JUSTFIT_LANE_BINDING(gid.y,next0,next1,next2,next3);
+ reinterpret_cast<device uint*>(current)[gid.x]=reinterpret_cast<device const uint*>(next)[gid.x];
+}

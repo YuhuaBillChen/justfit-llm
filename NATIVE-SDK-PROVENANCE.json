@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "product": "JustFit",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "platform": "macOS 27 or later, arm64",
   "native_binaries": {
     "source/build/justfit-engine": "C++/Objective-C++ engine built from source/runtime with the Xcode toolchain",

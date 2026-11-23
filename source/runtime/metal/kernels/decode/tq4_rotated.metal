@@ -120,6 +120,14 @@ inline void vtq4_codebook_page(JustFitTQ4PageView layer_page, uint kv_head,
             kv_head, thread_index)]);
 }
 
+template <bool ValueTensor, typename T, bool Coalesced>
+inline void vtq4_window_codebook_page(
+    device const JustFitKvPage *page_table, JustFitKvLayer kv, uint page,
+    uint last_page, uint kv_head, uint committed_tokens,
+    constant const JustFitTreeLane *tree, uint copy,
+    threadgroup T *page_values, threadgroup float *norms_out,
+    uint thread_index);
+
 template <uint QueryHeadsPerKVHead, uint RowsPerTile, typename T, bool Coalesced>
 inline void vtq4_rot_tile(
     device T *rotated_queries,
@@ -176,8 +184,8 @@ inline void vtq4_rot_tile(
 
   for (uint page = page_begin; page < page_end; ++page) {
     const JustFitTQ4PageView layer_page = justfit_tq4_page(page_table[page], kv);
-    vtq4_codebook_page<false, T, Coalesced>(layer_page, kv_head, page_values, key_norms,
-                              thread_index);
+    vtq4_window_codebook_page<false, T, Coalesced>(page_table, kv, page, pages - 1,
+        kv_head, committed_tokens, nullptr, 0, page_values, key_norms, thread_index);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     auto keys = tensor(page_values, dextents<int, 2>{D, N},
                        array<int, 2>{1, D});
@@ -188,7 +196,12 @@ inline void vtq4_rot_tile(
     page_scores.store(score_tensor.slice<N, M>(0, 0));
     if (thread_index == 0)
       atomic_store_explicit(rescale, 0u, memory_order_relaxed);
-    if (thread_index < N)
+    const bool window = page_table[JustFitTQ4ShadowEntry] != 0;
+    if (window) threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (window)
+      vtq4_window_codebook_page<true, T, Coalesced>(page_table, kv, page, pages - 1,
+          kv_head, committed_tokens, nullptr, 0, page_values, value_norms, thread_index);
+    else if (thread_index < N)
       value_norms[thread_index] = float(
           justfit_tq4_norms(layer_page, true)[justfit_tq4_vector_index(
               kv_head, thread_index)]);
@@ -207,8 +220,9 @@ inline void vtq4_rot_tile(
         running[index] *= previous_scale[coordinates[1]];
       }
     }
-    vtq4_codebook_page<true, T, Coalesced>(layer_page, kv_head, page_values, value_norms,
-                             thread_index);
+    if (!window)
+      vtq4_codebook_page<true, T, Coalesced>(layer_page, kv_head, page_values, value_norms,
+                               thread_index);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     auto values = tensor(page_values, dextents<int, 2>{N, D},
                          array<int, 2>{1, N});
@@ -395,6 +409,78 @@ inline void vtq4_codebook_page_tree(device const JustFitKvPage *page_table, Just
   }
 }
 
+// The rotated verifier expects H(Dk)/16 and H(Dv)/16, with a separate norm
+// for quantized pages. Transform BF16 entries in registers and set that norm
+// to one. Read speculative tree entries through the same ancestor mapping as
+// the packed reader.
+template <bool ValueTensor, typename T, bool Coalesced>
+inline void vtq4_window_codebook_page(
+    device const JustFitKvPage *page_table, JustFitKvLayer kv, uint page,
+    uint last_page, uint kv_head, uint committed_tokens,
+    constant const JustFitTreeLane *tree, uint copy,
+    threadgroup T *page_values, threadgroup float *norms_out,
+    uint thread_index) {
+  constexpr uint N = JustFitTQ4PageTokens;
+  constexpr uint D = JustFitTQ4HeadDimension;
+  const auto layer_page = justfit_tq4_page(page_table[page], kv);
+  if (tree)
+    vtq4_codebook_page_tree<ValueTensor, T, Coalesced>(page_table, kv, page,
+        kv_head, committed_tokens, *tree, copy, page_values, norms_out, thread_index);
+  else
+    vtq4_codebook_page<ValueTensor, T, Coalesced>(layer_page, kv_head,
+        page_values, norms_out, thread_index);
+  if (page_table[JustFitTQ4ShadowEntry] == 0 ||
+      (page != 0 && page + JUSTFIT_TQ4_WINDOW_PAGES <= last_page))
+    return;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  const uint lane = thread_index % 32;
+  const uint simd = thread_index / 32;
+  for (uint token = simd; token < N; token += 8) {
+    uint slot = page * N + token;
+    if (tree && slot >= committed_tokens) {
+      const uint depth = slot - committed_tokens;
+      if (depth >= tree->path_length[copy]) continue;
+      slot = committed_tokens + tree->path[copy][depth];
+    }
+    const auto shadow = justfit_tq4_shadow(page_table, kv, slot / N, ValueTensor, kv_head);
+    if (*shadow.tag != slot / N) continue;
+    float x[8];
+#pragma unroll
+    for (uint i = 0; i < 8; ++i) {
+      const uint d = lane * 8 + i;
+      x[i] = float(shadow.data[ValueTensor ? d * N + slot % N : (slot % N) * D + d]) *
+             justfit_tq4_sign(ValueTensor, d);
+    }
+#pragma unroll
+    for (uint span = 1; span < 8; span <<= 1) {
+#pragma unroll
+      for (uint base = 0; base < 8; base += 2 * span) {
+#pragma unroll
+        for (uint j = 0; j < span; ++j) {
+          const float a = x[base + j], b = x[base + j + span];
+          x[base + j] = a + b;
+          x[base + j + span] = a - b;
+        }
+      }
+    }
+#pragma unroll
+    for (uint span = 1; span < 32; span <<= 1) {
+#pragma unroll
+      for (uint i = 0; i < 8; ++i) {
+        const float peer = simd_shuffle_xor(x[i], span);
+        x[i] = (lane & span) ? peer - x[i] : x[i] + peer;
+      }
+    }
+#pragma unroll
+    for (uint i = 0; i < 8; ++i) {
+      const uint d = lane * 8 + i;
+      page_values[ValueTensor ? d * N + token : token * D + d] = T(x[i] * (1.0f / 16.0f));
+    }
+    if (lane == 0) norms_out[token] = 1.0f;
+  }
+}
+
 // vtq4_rot_tile for a tree: the chain's pages and splits for its eight rows
 // (visible committed + 8), verify-slot pages once per copy.
 template <uint QueryHeadsPerKVHead, uint RowsPerTile, typename T, bool Coalesced>
@@ -457,12 +543,9 @@ inline void vtq4_rot_tile_tree(
     const uint passes = history ? 1 : tree.copies;
     for (uint pass = 0; pass < passes; ++pass) {
       const JustFitTQ4PageView layer_page = justfit_tq4_page(page_table[page], kv);
-      if (history)
-        vtq4_codebook_page<false, T, Coalesced>(layer_page, kv_head, page_values, key_norms,
-                                                thread_index);
-      else
-        vtq4_codebook_page_tree<false, T, Coalesced>(page_table, kv, page, kv_head, committed_tokens,
-                                                     tree, pass, page_values, key_norms, thread_index);
+      const bool window = page_table[JustFitTQ4ShadowEntry] != 0;
+      vtq4_window_codebook_page<false, T, Coalesced>(page_table, kv, page, pages - 1,
+          kv_head, committed_tokens, history ? nullptr : &tree, pass, page_values, key_norms, thread_index);
       threadgroup_barrier(mem_flags::mem_threadgroup);
       auto keys = tensor(page_values, dextents<int, 2>{D, N},
                          array<int, 2>{1, D});
@@ -476,7 +559,11 @@ inline void vtq4_rot_tile_tree(
       threadgroup_barrier(mem_flags::mem_threadgroup);
       // Value norms come with the value decode below in the tree pass; the
       // chain reads them here, before the softmax.
-      if (history) {
+      if (window) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        vtq4_window_codebook_page<true, T, Coalesced>(page_table, kv, page, pages - 1,
+            kv_head, committed_tokens, history ? nullptr : &tree, pass, page_values, value_norms, thread_index);
+      } else if (history) {
         if (thread_index < N)
           value_norms[thread_index] = float(
               justfit_tq4_norms(layer_page, true)[justfit_tq4_vector_index(
@@ -500,7 +587,7 @@ inline void vtq4_rot_tile_tree(
           running[index] *= previous_scale[coordinates[1]];
         }
       }
-      if (history)
+      if (history && !window)
         vtq4_codebook_page<true, T, Coalesced>(layer_page, kv_head, page_values, value_norms,
                                                thread_index);
       threadgroup_barrier(mem_flags::mem_threadgroup);

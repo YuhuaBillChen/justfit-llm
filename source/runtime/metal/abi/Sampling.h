@@ -126,10 +126,14 @@ struct SamplingPenaltyParams {
   float repetition_inverse[JUSTFIT_MAXIMUM_BATCH_WIDTH];
   float presence[JUSTFIT_MAXIMUM_BATCH_WIDTH];
   float frequency[JUSTFIT_MAXIMUM_BATCH_WIDTH];
+  // The verify rows (bit r = row r's input token) in each row's context: row
+  // r's draft history. A chain's row r holds rows 1 .. r; a draft tree's row
+  // holds its ancestors and itself, never the anchor row 0.
+  uint32_t history[JUSTFIT_MAXIMUM_BATCH_WIDTH][16];
 };
 
-static_assert(sizeof(SamplingPenaltyParams) == 112,
-              "Sampling penalty parameters are 112 bytes on both sides");
+static_assert(sizeof(SamplingPenaltyParams) == 368,
+              "Sampling penalty parameters are 368 bytes on both sides");
 
 // The batched selector and acceptance kernels' grids cover exactly the
 // dispatch's lanes: per-lane arrays hold those lanes, and entries past them

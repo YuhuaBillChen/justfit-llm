@@ -90,10 +90,13 @@ struct GdnCommitBuffers final {
   std::span<const metal::MetalBuffer> currentStates;
   std::span<const metal::MetalBuffer> nextStates;
   metal::MetalBuffer retainedCounts;
+  metal::MetalBuffer acceptedPath{};
 };
 
 class GDN final {
 public:
+  static void setCompactResources(metal::MetalBackend &backend, metal::MetalBuffer input,
+                                  metal::MetalBuffer output, metal::MetalBuffer seed);
   static void addPrefill(metal::CommandGraph &graph, GdnPrefillBuffers buffers,
                          GdnShape shape, uint32_t tokens,
                          GdnHeadOrder order);
@@ -110,6 +113,10 @@ public:
                         GdnStateStrides state, bool tree = false);
   // addDecode for a draft-tree batch (metal/abi/TreeVerify.h): the 27B's
   // 48-value-head bf16-norm layout only; the commit then takes tree = true.
+  // Whether addDecodeTree has a tree kernel for the verify addDecode would
+  // encode with this input layout and mixer norm (the affine targets' bf16
+  // norms; a GGUF target's fp32 norm or Table16 input has none).
+  [[nodiscard]] static bool hasDecodeTree(GdnShape shape, LinearInput input, bool normFloat32) noexcept;
   static PreparedInput addDecodeTree(metal::CommandGraph &graph, GdnDecodeBuffers buffers,
                                      GdnShape shape, uint32_t lanes, uint32_t layer,
                                      GdnStateStrides state, GdnHeadOrder order,

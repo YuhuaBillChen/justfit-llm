@@ -323,9 +323,18 @@ pub fn convert(
             .as_array()
             .ok_or_else(|| bad("tools must be an array"))?;
         let mut out = Vec::new();
+        let policy = crate::hosted_tools::policy();
+        let mut ignored = Vec::new();
         for tool in tools {
-            if tool.get("type").is_some_and(|v| v != "custom") {
-                return Err(bad("only custom function tools are supported"));
+            if let Some(kind) = tool.get("type").filter(|v| *v != "custom") {
+                let kind = kind.as_str().unwrap_or("(invalid)");
+                crate::hosted_tools::handle(
+                    kind,
+                    crate::hosted_tools::anthropic_hosted(kind),
+                    policy,
+                    &mut ignored,
+                )?;
+                continue;
             }
             let default = json!({});
             let schema = tool.get("input_schema").unwrap_or(&default);

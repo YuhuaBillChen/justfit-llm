@@ -4,6 +4,7 @@
 #include "ane/Handoff.hpp"
 #include "ane/Program.hpp"
 #include "metal/CommandGraph.hpp"
+#include "metal/abi/AneFfn.h"
 #include "metal/abi/ExecutionGeometry.h"
 #include "ops/AneFfnCalibration.hpp"
 #include "ops/Linear.hpp"
@@ -160,6 +161,11 @@ private:
   // the ANE's, and the segments of down's inputs the ANE takes.
   struct Shape final {
     uint32_t hidden = 0, intermediate = 0, layers = 0, gpu = 0, ane = 0;
+    // Prism-rotated GGUF layers (InputRotation): the ANE takes its inputs
+    // rotated as gate and up read them, and rotates its intermediate rows
+    // by its own rotation times down's, in blocks of GGUF_ROTATION_BLOCK.
+    bool prism = false;
+    uint32_t rotationBlock = ANE_FFN_INTERMEDIATE_BLOCK;
     std::vector<uint32_t> downSegments;
   };
   // A staging set of the ANE's int8 weights: gate's and up's rows over each
@@ -177,6 +183,9 @@ private:
   // word (ane_ffn_join).
   struct Memory final {
     metal::MetalBuffer signs, rowScales, rotated, status;
+    // Prism-rotated layers only: the chunk's normalized rows rotated as gate
+    // and up read them (gguf_rotate), which ane_ffn_rotate rotates on.
+    metal::MetalBuffer prismInput;
     std::vector<ane::Surface> inputs;
     ane::Surface tokenScale, partial;
     std::array<Weights, 2> sets;

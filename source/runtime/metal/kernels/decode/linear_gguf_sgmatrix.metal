@@ -302,7 +302,7 @@ kernel void decode_linear_gguf_prepare(device const bfloat *input [[buffer(0)]],
                    constant GgufDecodeParams &p [[buffer(9)]], uint2 tg [[threadgroup_position_in_grid]],       \
                    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],    \
                    uint lane [[thread_index_in_simdgroup]]) {                                               \
-    threadgroup bfloat2 lut[F::Kind == QuantCodebook ? kQuantPairTableEntries : 1];                         \
+    threadgroup bfloat2 lut[(F::Kind == QuantCodebook || quant_has_table<F>::value) ? kQuantPairTableEntries : 1];                         \
     threadgroup gguf_sg::Coef<F> coefs[gguf_sg::kCoefs<F>];                                                 \
     threadgroup uint arrival;                                                                               \
     quant_pair_table<F>(lut, tid, GGUF_REGISTER_THREADS);                                                                              \

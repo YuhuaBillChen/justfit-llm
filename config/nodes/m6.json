@@ -5,6 +5,7 @@
     "JUSTFIT_STAGED_PREFILL": "1",
     "JUSTFIT_ROTATED_VERIFY": "1",
     "JUSTFIT_PREFILL_A8": "1",
+    "JUSTFIT_DECODE_INT8": "1",
     "JUSTFIT_VERIFY_A8": "1",
     "JUSTFIT_VISION_PHASE": "1",
     "JUSTFIT_COMPACT_SOFTMAX": "1",
@@ -42,7 +43,11 @@
     "JUSTFIT_CPU_GROUP64_WEIGHTED": "0",
     "JUSTFIT_CPU_DIRECT_ZA": "0",
     "JUSTFIT_CPU_VECTOR_PANEL": "0",
-    "JUSTFIT_MIXED_DECODE_MAX_LANES": "2"
+    "JUSTFIT_MIXED_DECODE_MAX_LANES": "2",
+    "JUSTFIT_COMPACT_GDN": "1",
+    "JUSTFIT_TQ4_WINDOW": "1",
+    "JUSTFIT_TQ4_NC": "3",
+    "JUSTFIT_TREE_CONSTRAINED": "1"
   },
   "vision_phase_qualification": {
     "prefill": false,
@@ -80,5 +85,20 @@
   ],
   "served_model_names": [
     "incoai/Qwen3.8-27B-Splash"
-  ]
+  ],
+  "memory_16": {
+    "note": "16 GB M6 (base chip): Bonsai 2 PTQ1_0 with compressed GDN, BF16 KV window and norm correction, 12.1 GiB budget, 221,169 tokens; measured with a 16 GiB lock and a 3 GiB foreground load.",
+    "model": "prism-ml/Ternary-Bonsai-2-27B-gguf:PTQ1_0",
+    "environment": {
+      "JUSTFIT_PREFILL_A8": "0",
+      "JUSTFIT_DECODE_INT8": "1",
+      "JUSTFIT_COMPACT_GDN": "1",
+      "JUSTFIT_TQ4_WINDOW": "1",
+      "JUSTFIT_TQ4_NC": "3"
+    },
+    "server_arguments": {
+      "--max-context": "221169",
+      "--max-memory": "12390M"
+    }
+  }
 }

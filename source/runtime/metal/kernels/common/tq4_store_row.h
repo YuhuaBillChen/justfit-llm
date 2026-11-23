@@ -27,6 +27,23 @@ inline void justfit_tq4_store_row(
                                      dimension);
   const float input =
       float(value_tensor ? chunk_values[source_index] : chunk_keys[source_index]);
+  {
+    const JustFitTQ4Shadow shadow = justfit_tq4_shadow(
+        page_table, chunk.kv, logical_token / JustFitTQ4PageTokens, value_tensor, head);
+    const uint page = logical_token / JustFitTQ4PageTokens;
+#ifdef JUSTFIT_PREFILL_RING_OWNER
+    const uint last = (chunk.committed_tokens + chunk.chunk_tokens - 1) / JustFitTQ4PageTokens;
+    const bool owner = page == 0 || page + JustFitTQ4ShadowRing > last;
+#else
+    const bool owner = true;
+#endif
+    if (shadow.data && owner) {
+      shadow.data[value_tensor ? dimension * JustFitTQ4PageTokens + page_token
+                               : page_token * JustFitTQ4HeadDimension + dimension] =
+          value_tensor ? chunk_values[source_index] : chunk_keys[source_index];
+      if (dimension == 0 && (chunk_token == 0 || page_token == 0)) *shadow.tag = page;
+    }
+  }
 
   const float local_sum = simd_sum(input * input);
   if (simd_lane == 0)
@@ -59,8 +76,12 @@ inline void justfit_tq4_store_row(
 
   const auto layer_page = justfit_tq4_page(entry, chunk.kv);
   const ulong vector_index = justfit_tq4_vector_index(head, page_token);
+  // Norm correction (JUSTFIT_TQ4_NC): 1 = keys, 2 = values, 3 = both store norm / |codeword| (host
+  // flag, one entry past the window address).
+  const uint TQ4_NC = uint(page_table[JustFitTQ4ShadowEntry + 1]);
   if (dimension < JustFitTQ4PackedWords) {
     uint word = 0;
+    float energy = 0.0f;
     for (uint nibble = 0; nibble < 8; ++nibble) {
       const uint d = dimension * 8 + nibble;
       const float rotated = vector[d] * (1.0f / 16.0f);
@@ -68,10 +89,15 @@ inline void justfit_tq4_store_row(
       for (uint threshold = 0; threshold < 15; ++threshold)
         code += rotated > JustFitTQ4Midpoints[threshold];
       word |= code << (nibble * 4);
+      energy += JustFitTQ4Codebook[code] * JustFitTQ4Codebook[code];
+    }
+    energy = simd_sum(energy);
+    if (dimension == 0) {
+      const bool correct = (TQ4_NC & (value_tensor ? 2 : 1)) != 0;
+      justfit_tq4_norms(layer_page, value_tensor)[vector_index] =
+          half(correct && energy > 0.0f ? norm / sqrt(energy) : norm);
     }
     justfit_tq4_indices(layer_page, value_tensor)
         [vector_index * JustFitTQ4PackedWords + dimension] = word;
   }
-  if (dimension == 0)
-    justfit_tq4_norms(layer_page, value_tensor)[vector_index] = half(norm);
 }

@@ -450,6 +450,7 @@ struct ModelTelemetry final {
   // Pooled state buffers no lane holds: GDN parity cells and draft rings.
   uint32_t idleGdnCells = 0;
   uint32_t idleDraftRings = 0;
+  uint64_t idleConvolutionScratchBytes = 0;
   uint64_t targetPrefillRows = 0;
   uint64_t draftContextRowsActive = 0;
   uint64_t draftContextRowsMaterialization = 0;

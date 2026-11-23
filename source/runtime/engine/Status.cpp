@@ -162,6 +162,7 @@ std::string runtimeStatusJson(
       << ",\"active_lanes\":" << resources.activeRequests
       << ",\"idle_gdn_cells\":" << executorTelemetry.idleGdnCells
       << ",\"idle_draft_rings\":" << executorTelemetry.idleDraftRings
+      << ",\"idle_convolution_scratch_bytes\":" << executorTelemetry.idleConvolutionScratchBytes
       << ",\"publications\":" << state.publications
       << ",\"evictions\":" << state.evictions
       << ",\"checkpoint_entries\":" << state.checkpointEntries

@@ -1,6 +1,7 @@
 // Modified for JustFit: product identity and integration.
 #include "ops/VerifyShape.hpp"
 #include "ops/GDN.hpp"
+#include "model/StateLayout.hpp"
 
 #include <cstring>
 
@@ -17,6 +18,20 @@
 
 namespace justfit::ops {
 namespace {
+using model::compactGdnEnabled;
+metal::MetalBackend *compactBackend = nullptr;
+metal::MetalBuffer compactInput, compactOutput, compactSeed;
+
+std::string compactVerifyName(const std::string &dense, bool tree) {
+  constexpr std::string_view prefix = "verify_gdn_fused";
+  if (!dense.starts_with(prefix))
+    throw std::invalid_argument("unsupported compact GDN projection");
+  const std::string suffix = dense.substr(prefix.size());
+  if (tree)
+    return (activeVerifyRows() == 16 ? "compact_gdn_tree16_verify" : "compact_gdn_tree_verify") + suffix;
+  if (activeVerifyRows() == 16) return "compact_gdn_tree16_chain_verify" + suffix;
+  return "compact_gdn_fused" + suffix;
+}
 
 static_assert(offsetof(GDNDecodeBatchParams, conv_layer_bytes) == 8);
 
@@ -44,7 +59,11 @@ uint64_t valueWidth(const GdnShape &shape) { return uint64_t{shape.valueHeads} *
 uint64_t carriedBytes(const GdnShape &shape) {
   return uint64_t{JUSTFIT_GDN_CONVOLUTION_TAPS - 1} * shape.convolutionDimension * 2;
 }
-uint64_t recurrentBytes(const GdnShape &shape) { return valueWidth(shape) * shape.headDimension * sizeof(float); }
+uint64_t recurrentBytes(const GdnShape &shape) {
+  if (compactGdnEnabled())
+    return uint64_t{shape.valueHeads} * JUSTFIT_COMPACT_HEAD_BYTES + uint64_t{shape.valueHeads / 3} * 4096u;
+  return valueWidth(shape) * shape.headDimension * sizeof(float);
+}
 
 // The bytes of `rows` rows of the packed projection the kernels read: each
 // row's q, k and v convolution inputs, z, then beta and alpha per value head.
@@ -79,11 +98,19 @@ void requireStates(const GdnShape &shape, GdnStateStrides strides, uint32_t laye
                strides.convolutionStateBytes + uint64_t{layer} * strides.recurrentLayerBytes + recurrentBytes(shape));
   for (uint32_t lane = 0; lane < lanes; ++lane) {
     requireBytes(current[lane], bytes, "GDN current state");
-    requireBytes(next[lane], bytes, "GDN next state");
+    requireBytes(next[lane], uint64_t{layer}*strides.convolutionLayerBytes+carriedBytes(shape), "GDN commit convolution");
   }
 }
 
 } // namespace
+
+void GDN::setCompactResources(metal::MetalBackend &backend, metal::MetalBuffer input,
+                              metal::MetalBuffer output, metal::MetalBuffer seed) {
+  compactBackend = &backend;
+  compactInput = std::move(input);
+  compactOutput = std::move(output);
+  compactSeed = std::move(seed);
+}
 
 void GDN::addPrefill(metal::CommandGraph &graph, GdnPrefillBuffers buffers,
                      GdnShape shape, uint32_t tokens, GdnHeadOrder order) {
@@ -106,6 +133,13 @@ void GDN::addPrefill(metal::CommandGraph &graph, GdnPrefillBuffers buffers,
   requireBytes(buffers.recurrentOut, recurrentBytes(shape), "GDN next recurrent state");
   requireBytes(buffers.recurrentRows, valueRows, "GDN recurrent row");
   requireBytes(buffers.hidden, valueRows, "GDN hidden");
+  const auto residentOutput = buffers.recurrentOut;
+  if (compactGdnEnabled()) {
+    graph.add("compact_unfold_layer", {buffers.recurrentIn, compactInput},
+              CompactLayerParams{shape.valueHeads, 0}, {shape.valueHeads, 1, 1}, {128, 1, 1});
+    buffers.recurrentIn = compactInput;
+    buffers.recurrentOut = compactOutput;
+  }
   const GDNPrefillParams params{tokens};
   graph.add(kernelName(kernel, "prefill_gdn_prepare",
                        "prefill_gdn_prepare_vh32"),
@@ -130,6 +164,11 @@ void GDN::addPrefill(metal::CommandGraph &graph, GdnPrefillBuffers buffers,
              buffers.hidden},
             GDNGatePrefillParams{order == GdnHeadOrder::Tiled},
             {uint64_t{tokens} * shape.valueHeads, 1, 1}, {128, 1, 1});
+  if (compactGdnEnabled())
+    graph.add("compact_pack_layer", {compactOutput, compactSeed, residentOutput},
+              CompactLayerParams{shape.valueHeads, 0}, {shape.valueHeads, 1, 1}, {128, 1, 1});
+  const uint32_t words=static_cast<uint32_t>(carriedBytes(shape)/4);
+  graph.add("gdn_prefill_carry_copy",{buffers.convolutionOut,buffers.convolutionIn},words,{(words+255u)/256u,1,1},{256,1,1});
 }
 
 PreparedInput GDN::addDecode(metal::CommandGraph &graph, GdnDecodeBuffers buffers,
@@ -167,7 +206,9 @@ PreparedInput GDN::addDecode(metal::CommandGraph &graph, GdnDecodeBuffers buffer
                                     state.recurrentLayerBytes,
                                     state.convolutionStateBytes};
   const std::string name = std::string("verify_gdn_fused") + tableSuffix(input) + kernelName(kernel, "", "_vh32");
-  graph.add(normKernel(name, buffers.mixerNorm, shape.headDimension), std::move(bindings), params,
+  std::string selected = normKernel(name, buffers.mixerNorm, shape.headDimension);
+  if (compactGdnEnabled()) selected = compactVerifyName(selected, false);
+  graph.add(std::move(selected), std::move(bindings), params,
             {shape.valueHeads, lanes, 1});
   if (!prepare) return {};
   return {buffers.hidden, input};
@@ -202,10 +243,58 @@ void GDN::addCommit(metal::CommandGraph &graph, GdnCommitBuffers buffers,
                                     state.convolutionStateBytes};
   if (tree && shape.valueHeads != 48)
     throw std::invalid_argument("tree GDN commit supports 48 value heads");
-  graph.add(tree ? "verify_gdn_commit_tree" : kernelName(kernel, "verify_gdn_commit",
-                       "verify_gdn_commit_vh32"),
-            std::move(bindings), params,
-            {shape.valueHeads, layers, lanes});
+  const bool compact = compactGdnEnabled();
+  const bool wide = activeVerifyRows() == 16;
+  const bool wideChain = compact && wide && !tree;
+  std::vector<metal::MetalBuffer> continuation;
+  if (wideChain) continuation = bindings;
+  if (compact && tree && !wide) {
+    requireBytes(buffers.acceptedPath, uint64_t{lanes} * JUSTFIT_TREE_MAXIMUM_DEPTH * sizeof(uint32_t),
+                 "compact GDN accepted path");
+    bindings.push_back(buffers.acceptedPath);
+  }
+  const std::string selected = compact
+      ? (tree ? (wide ? "compact_gdn_tree16_commit" : "compact_gdn_tree_commit")
+              : (wide ? "compact_gdn_tree16_chain_commit0" : "compact_gdn_commit"))
+      : (tree ? "verify_gdn_commit_tree"
+              : kernelName(kernel, "verify_gdn_commit", "verify_gdn_commit_vh32"));
+  graph.add(selected, std::move(bindings), params, {shape.valueHeads, layers, lanes});
+  std::vector<metal::MetalBuffer> carryBindings;
+  appendLaneBindings(carryBindings,buffers.currentStates,buffers.nextStates);
+  graph.add(compact ? "compact_finish_commit" : "gdn_finish_commit",
+            std::move(carryBindings), params, {(state.convolutionStateBytes/4+255)/256,lanes,1}, {256,1,1});
+  if (!compact) return;
+  constexpr uint32_t layersPerFlush = 4;
+  for (uint32_t lane = 0; lane < lanes; ++lane) {
+    for (uint32_t layer = 0; layer < layers; layer += layersPerFlush) {
+      const uint32_t chunk = std::min(layersPerFlush, layers - layer);
+      auto cell = compactBackend->view(buffers.currentStates[lane],
+          state.convolutionStateBytes + uint64_t{layer} * state.recurrentLayerBytes,
+          uint64_t{chunk} * state.recurrentLayerBytes);
+      bool needsRefresh = false;
+      for (uint32_t index = 0; index < chunk; ++index) {
+        uint32_t count = 0;
+        std::memcpy(&count, static_cast<const std::byte *>(cell.contents()) +
+                    uint64_t{index} * state.recurrentLayerBytes + JUSTFIT_COMPACT_COUNT, sizeof(count));
+        needsRefresh |= count + activeVerifyRows() > 8;
+      }
+      if (!needsRefresh) continue;
+      const uint32_t heads = shape.valueHeads * chunk;
+      for (const char *name : {"lq_flush_prepare_early", "lq_flush_all_hoisted"})
+        graph.add(name, {cell, compactOutput, cell, compactSeed}, CompactLayerParams{heads, 1},
+                  {heads, 1, 1}, {128, 1, 1});
+    }
+  }
+  if (wideChain)
+    graph.add("compact_gdn_tree16_chain_commit1", std::move(continuation), params,
+              {shape.valueHeads, layers, lanes});
+}
+
+bool GDN::hasDecodeTree(GdnShape shape, LinearInput input, bool normFloat32) noexcept {
+  const std::string name = std::string("verify_gdn_fused") + tableSuffix(input) +
+                           kernelName(kernelShape(shape), "", "_vh32") + (normFloat32 ? "_f32" : "");
+  return name == "verify_gdn_fused" || name == "verify_gdn_fused_table64" ||
+         name == "verify_gdn_fused_f32" || name == "verify_gdn_fused_table16_f32";
 }
 
 PreparedInput GDN::addDecodeTree(metal::CommandGraph &graph, GdnDecodeBuffers buffers,
@@ -218,8 +307,14 @@ PreparedInput GDN::addDecodeTree(metal::CommandGraph &graph, GdnDecodeBuffers bu
   const auto &dispatch = probe.dispatches().front();
   std::string name = dispatch.pipelineName;
   if (name.starts_with("wide16::")) name = name.substr(8);  // push() adds it back
-  if (name == "verify_gdn_fused_table64") name = "verify_gdn_fused_tree_table64";
+  if (compactGdnEnabled()) {
+    const std::string prefix = activeVerifyRows() == 16
+        ? "compact_gdn_tree16_chain_verify" : "compact_gdn_fused";
+    name = compactVerifyName("verify_gdn_fused" + name.substr(prefix.size()), true);
+  } else if (name == "verify_gdn_fused_table64") name = "verify_gdn_fused_tree_table64";
   else if (name == "verify_gdn_fused") name = "verify_gdn_fused_tree";
+  else if (name == "verify_gdn_fused_table16_f32") name = "verify_gdn_fused_tree_table16_f32";
+  else if (name == "verify_gdn_fused_f32") name = "verify_gdn_fused_tree_f32";
   else throw std::invalid_argument("no tree GDN verify for " + name);
   if (lanes > 2) throw std::invalid_argument("tree GDN verify takes at most two lanes");
   GDNTreeDecodeParams params{};

@@ -4,7 +4,9 @@ use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
 use std::{fs,io::Read,os::unix::fs::OpenOptionsExt,path::{Path,PathBuf}};
-#[derive(Clone,Deserialize,Serialize)]pub struct Delivery{pub project:PathBuf,pub node:String,pub model:PathBuf,pub descriptor:PathBuf,pub sha256:String,pub payload:PathBuf}
+// `compile`: the user chose local ANE compilation (--ane-compile) when this
+// macOS build has no precompiled programs; otherwise vision stays on the GPU.
+#[derive(Clone,Deserialize,Serialize)]pub struct Delivery{pub project:PathBuf,pub node:String,pub model:PathBuf,pub descriptor:PathBuf,pub sha256:String,pub payload:PathBuf,#[serde(default)]pub compile:bool}
 fn bounded(path:&Path,limit:u64)->Result<Value>{let input=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;if !input.metadata()?.is_file()||input.metadata()?.len()>limit{return Err("ANE delivery metadata is not a bounded regular file".into());}let mut bytes=vec![];input.take(limit+1).read_to_end(&mut bytes)?;if bytes.len()as u64>limit{return Err("ANE delivery metadata exceeds size limit".into());}Ok(serde_json::from_slice(&bytes)?)}
 fn descriptor(config:&Delivery)->Result<Value>{
  if !["m4","m5","m6"].contains(&config.node.as_str())||config.project.canonicalize()?!=config.project{return Err("invalid owned ANE delivery workspace or node".into());}crate::download::digest(&config.sha256)?;let pins=cli::verify(&config.project)?;let expected=pins.get("config/ane-distribution.json").ok_or("ANE distribution is not pinned by this workspace")?;
@@ -12,14 +14,16 @@ fn descriptor(config:&Delivery)->Result<Value>{
  let data=bounded(&config.descriptor,64*1024)?;if data["schema"]!=1||data["kind"]!="justfit-ane-defaults"||data["version"]!=cli::VERSION||data["native_cache_abi"]!=1||data["cache_namespace"]!=ane_bundle::NAMESPACE{return Err("incompatible default ANE distribution".into());}
  if data["vision_weights_sha256"]!=crate::vision_identity::sha(&config.project.join("source/build/justfit-engine"),&config.model)?{return Err("default ANE distribution does not match this vision model".into());}Ok(data)
 }
-pub fn discover(project:&Path,node:&str,model:&Path)->Result<Option<Delivery>>{
+pub fn discover(project:&Path,node:&str,model:&Path,compile:bool)->Result<Option<Delivery>>{
  let path=project.join("config/ane-distribution.json");if !path.exists()||!model.join("vision/model.bin").is_file()&&!model.join("model.json").is_file(){return Ok(None);}let pins=cli::verify(project)?;let sha256=pins.get("config/ane-distribution.json").ok_or("default ANE descriptor is not source-pinned")?.clone();let source_sha=cli::digest(&project.join("package-manifest.json"))?;
  let payload=bounded(&project.join("distribution-locator.json"),16384).ok().filter(|v|v["source_manifest_sha256"]==source_sha).and_then(|v|v["payload"].as_str().map(PathBuf::from)).filter(|p|cli::digest(&p.join("package-manifest.json")).is_ok_and(|sha|sha==source_sha)).unwrap_or_else(||cli::payload_root().unwrap_or_else(|_|project.to_path_buf()));
- let config=Delivery{project:project.canonicalize()?,node:node.into(),model:model.canonicalize()?,descriptor:path.canonicalize()?,sha256,payload:payload.canonicalize()?};
+ let config=Delivery{project:project.canonicalize()?,node:node.into(),model:model.canonicalize()?,descriptor:path.canonicalize()?,sha256,payload:payload.canonicalize()?,compile};
  // An unsupported model uses GPU vision; a malformed pinned descriptor fails
  // verification rather than silently installing a different model's assets.
  let data=bounded(&config.descriptor,64*1024)?;if data["vision_weights_sha256"]!=crate::vision_identity::sha(&project.join("source/build/justfit-engine"),model)?{return Ok(None);}let data=descriptor(&config)?;let current=ane_bundle::identity()?;
- if select(&data,node,&current).is_empty(){return Ok(None);}Ok(Some(config))
+ let rows=select(&data,node,&current);
+ if !compile&&!rows.is_empty()&&rows.iter().all(|(_,graphs)|*graphs){eprintln!("ANE vision: no precompiled programs for this Mac and macOS build ({}); images run on the GPU. Pass --ane-compile to compile them locally once (30 minutes to over an hour of background work).",current.os_build);return Ok(None);}
+ if rows.is_empty(){return Ok(None);}Ok(Some(config))
 }
 fn select<'a>(data:&'a Value,node:&str,current:&ane_bundle::Identity)->Vec<(&'a Value,bool)>{
  let matches=|kind:&str|data[kind].as_array().into_iter().flatten().filter(|row|row["node"]==node&&row["chip"]==current.chip&&(kind=="graphs"||row["os_build"]==current.os_build)).collect::<Vec<_>>();let mut selected=matches("precompiled").into_iter().map(|row|(row,false)).collect::<Vec<_>>();selected.extend(matches("graphs").into_iter().map(|row|(row,true)));selected
@@ -42,7 +46,7 @@ fn install_row(config:&Delivery,common:&Path,row:&Value,graphs:bool)->Result<Pat
 pub fn install(config:&Delivery)->Result<PathBuf>{
  let data=descriptor(config)?;let common=location(config)?;let ready=common.join("tiered.json");
  if ready.is_file(){let top=bounded(&ready,64*1024)?;if top["schema"]!=3{return Err("default ANE ready profile is invalid".into());}for tier in top["tiers"].as_array().filter(|v|v.len()==2).ok_or("default ANE ready tiers missing")?{let name=tier["profile"].as_str().filter(|n|crate::model_install::safe_path(n)).ok_or("unsafe ready ANE tier")?;let path=common.join(name);if tier["sha256"]!=cli::digest(&path)?{return Err("default ANE ready tier pin mismatch".into());}crate::ane_native::Profile::open_for_preparation(&path).map_err(|e|e.1)?;}return Ok(ready);}
- let current=ane_bundle::identity()?;let selected=select(&data,&config.node,&current);if selected.len()>2{return Err("ambiguous default ANE delivery choices".into());}let mut failures=vec![];
+ let current=ane_bundle::identity()?;let selected=select(&data,&config.node,&current).into_iter().filter(|(_,graphs)|config.compile||!*graphs).collect::<Vec<_>>();if selected.len()>2{return Err("ambiguous default ANE delivery choices".into());}let mut failures=vec![];
  for (row,graphs) in selected{match install_row(config,&common,row,graphs){Ok(profile)=>return Ok(profile),Err(error)=>failures.push(error.to_string())}}
  Err(format!("default ANE assets unavailable; GPU service remains active: {}",failures.join("; ")).into())
 }

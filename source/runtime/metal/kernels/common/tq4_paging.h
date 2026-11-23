@@ -2,6 +2,7 @@
 #pragma once
 
 #include "metal/abi/ExecutionGeometry.h"
+#include "metal/abi/Tq4Window.h"
 #include "metal/kernels/common/kv_extent.h"
 #include <metal_stdlib>
 
@@ -20,6 +21,39 @@ constant uint JustFitTQ4IndicesBytesPerLayerPage = 16384;
 constant uint JustFitTQ4NormBytesPerLayerPage = 256;
 constant uint JustFitTQ4BytesPerLayerPage = 33280;
 constant uint JustFitTQ4BytesPerModelPage = 532480;
+
+// Full-precision KV window (JUSTFIT_TQ4_WINDOW). The first page and the
+// newest JUSTFIT_TQ4_WINDOW_PAGES pages of a lane also keep their BF16 keys and
+// values in a per-lane shadow buffer whose GPU address the host writes one entry
+// past the lane's page table (0 = off). Slot 0 holds page 0; page p > 0 lives in
+// slot 1 + p % RingPages. Every slot carries the page it holds, per layer, tensor
+// and head, so a reader that finds another page there falls back to TQ4.
+#ifndef JUSTFIT_TQ4_WINDOW_PAGES
+#define JUSTFIT_TQ4_WINDOW_PAGES JUSTFIT_TQ4_WINDOW_HOT_PAGES
+#endif
+constant uint JustFitTQ4ShadowEntry =
+    (JUSTFIT_MAXIMUM_PHYSICAL_KV_TOKENS + JUSTFIT_TARGET_KV_BLOCK_TOKENS - 1) / JUSTFIT_TARGET_KV_BLOCK_TOKENS;
+constant uint JustFitTQ4ShadowRing = JUSTFIT_TQ4_WINDOW_RING;
+constant uint JustFitTQ4ShadowSlots = 1 + JustFitTQ4ShadowRing;
+constant uint JustFitTQ4ShadowTensorElements = 4 * JUSTFIT_TARGET_KV_BLOCK_TOKENS * 256;
+constant ulong JustFitTQ4ShadowDataBytes = JUSTFIT_TQ4_WINDOW_DATA_BYTES;
+struct JustFitTQ4Shadow {
+  device bfloat *data;   // one KV head's slab of one tensor of the slot
+  device uint *tag;
+};
+inline uint justfit_tq4_shadow_slot(uint page) {
+  return page == 0 ? 0u : 1u + page % JustFitTQ4ShadowRing;
+}
+inline JustFitTQ4Shadow justfit_tq4_shadow(device const JustFitKvPage *page_table, JustFitKvLayer kv,
+                                         uint page, bool value_tensor, uint head) {
+  const ulong base = page_table[JustFitTQ4ShadowEntry];
+  if (base == 0) return {nullptr, nullptr};
+  const uint layer = kv.offset / (kv.extent_pages * 33280u);
+  const uint index = ((layer * JustFitTQ4ShadowSlots + justfit_tq4_shadow_slot(page)) * 2 + (value_tensor ? 1 : 0)) * 4 + head;
+  device uchar *bytes = reinterpret_cast<device uchar *>(base);
+  return {reinterpret_cast<device bfloat *>(bytes) + ulong(index) * (JUSTFIT_TARGET_KV_BLOCK_TOKENS * 256),
+          reinterpret_cast<device uint *>(bytes + JustFitTQ4ShadowDataBytes) + index};
+}
 
 constant float JustFitTQ4Codebook[16] = {
     -0.168522835f, -0.127540648f, -0.0996119156f, -0.0771940202f,

@@ -202,7 +202,7 @@ fn resumable_archive(root:&Path,row:&Value,agent:&ureq::Agent)->Result<PathBuf>{
     let sha=row["sha256"].as_str().ok_or("default ANE archive digest missing")?;download::digest(sha)?;let bytes=row["bytes"].as_u64().filter(|v|*v>0&&*v<=ARCHIVE_LIMIT).ok_or("default ANE download requires a bounded byte count")?;
     let cache=root.join("local-state/ane-downloads").join(sha);safe(&cache)?;fs::create_dir_all(&cache)?;let _lock=Lock::take(&cache)?;let archive=cache.join("archive.zip");let receipt=cache.join("owner.json");let expected=json!({"kind":"justfit-ane-download","sha256":sha,"bytes":bytes});
     if receipt.exists(){if json_file(&receipt,8192)?!=expected{return Err("foreign ANE download owner receipt; no data overwritten".into());}}else{if archive.exists(){return Err("ANE partial has no owner receipt; preserved".into());}immutable_json(&receipt,&expected)?;}
-    download::fetch_resumable_with(agent,row["url"].as_str().ok_or("ANE archive URL missing")?,&archive,bytes,sha,None)?;Ok(archive)
+    let url=row["url"].as_str().ok_or("ANE archive URL missing")?;download::fetch_parallel_with(agent,url,&archive,bytes,sha,None)?;Ok(archive)
 }
 fn fetch_at(target:&DownloadTarget<'_>,url:&str,sha:&str,agent:&ureq::Agent)->Result<Option<PathBuf>>{
     let DownloadTarget{root,node,model,cache,current,assets,graph_only}=*target;
@@ -252,7 +252,7 @@ pub fn run_cli(args:&[String])->Result<()> {
     let root=match flags.get("--project"){Some(path)=>std::path::absolute(path)?,None=>crate::cli::default_project()?};
     if !root.exists(){cli::initialize(&cli::payload_root()?,&root)?;}
     let root=root.canonicalize()?;cli::verify(&root)?;
-    let node=match flags.get("--node"){Some(node)=>*node,None=>crate::cli::detect_preset()?};if !["m4","m5","m6"].contains(&node){return Err("invalid ANE node".into());}
+    let node=crate::cli_serve::preset_node(match flags.get("--node"){Some(node)=>*node,None=>crate::cli::detect_preset()?}).0;if !["m4","m5","m6"].contains(&node){return Err("invalid ANE node".into());}
     let held=crate::model_install::resolve_for_serve_options(&root,flags.get("--model").copied().unwrap_or(crate::model_install::DEFAULT_MODEL),flags.get("--revision").copied(),None,None,false)?;let model=held.path.clone();
     let profile=install_options(&root,node,&model,&bundles,&pins,manifest,manifest_pin)?;
     println!("{}",json!({"installed":true,"vision_profile":profile,"note":"both 4K and 8K tiers are required for the automatic profile","installer":"rust"}));Ok(())
@@ -431,7 +431,7 @@ mod tests {
         let descriptor=fixture.project.join("config/ane-distribution.json");fs::create_dir_all(descriptor.parent().unwrap()).unwrap();
         let data=json!({"schema":1,"kind":"justfit-ane-defaults","version":cli::VERSION,"native_cache_abi":1,"cache_namespace":NAMESPACE,"vision_weights_sha256":model_sha(&fixture.project,&fixture.model).unwrap(),"precompiled":[{"node":"m4","chip":fixture.current.chip,"os_build":fixture.current.os_build,"bundles":bundles}],"graphs":[]});
         fs::write(&descriptor,serde_json::to_vec(&data).unwrap()).unwrap();let manifest=fixture.project.join("package-manifest.json");let mut pins:BTreeMap<String,String>=serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();pins.insert("config/ane-distribution.json".into(),regular_sha(&descriptor).unwrap());fs::write(&manifest,serde_json::to_vec(&pins).unwrap()).unwrap();
-        let config=crate::ane_distribution::Delivery{project:fixture.project.clone(),node:"m4".into(),model:fixture.model.clone(),descriptor:descriptor.clone(),sha256:regular_sha(&descriptor).unwrap(),payload:fixture.project.clone()};
+        let config=crate::ane_distribution::Delivery{project:fixture.project.clone(),node:"m4".into(),model:fixture.model.clone(),descriptor:descriptor.clone(),sha256:regular_sha(&descriptor).unwrap(),payload:fixture.project.clone(),compile:true};
         assert!(!crate::ane_distribution::profile(&config).unwrap().exists());
         let top=crate::ane_distribution::install(&config).unwrap();assert_eq!(top,crate::ane_distribution::profile(&config).unwrap());let before=regular_sha(&top).unwrap();let cached=file_set(&fixture.cache).unwrap();assert!(!cached.is_empty());
         assert_eq!(crate::ane_distribution::install(&config).unwrap(),top);assert_eq!(regular_sha(&top).unwrap(),before);assert_eq!(file_set(&fixture.cache).unwrap(),cached);

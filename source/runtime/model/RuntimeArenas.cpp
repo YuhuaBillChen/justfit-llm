@@ -213,8 +213,10 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
   const ops::AttentionWorkspace attentionWorkspace =
       operators.verifyAttentionWorkspacePerLane(
           geometry.target.attentionQueryHeads, geometry.target.kvLayout);
-  put(DecodeTensor::AttentionPartials, attentionWorkspace.partialsBytes);
-  put(DecodeTensor::AttentionStatistics, attentionWorkspace.statisticsBytes);
+  if (!compactGdnEnabled()) {
+    put(DecodeTensor::AttentionPartials, attentionWorkspace.partialsBytes);
+    put(DecodeTensor::AttentionStatistics, attentionWorkspace.statisticsBytes);
+  }
   put(DecodeTensor::FullAttention,
       bytesFor<uint16_t>(uint64_t{geometry.target.attentionQueryHeads} *
                          kv::kVerifyChunkStride *
@@ -296,7 +298,7 @@ decodeTensorBytes(const RuntimeGeometry &geometry,
   put(DecodeTensor::VerifyProposals, bytesFor<uint32_t>(15));
   put(DecodeTensor::VerifyCandidates, bytesFor<uint32_t>(15*JUSTFIT_DRAFT_CANDIDATES));
   put(DecodeTensor::VerifyProbabilities, bytesFor<float>(15*JUSTFIT_DRAFT_CANDIDATES));
-  put(DecodeTensor::PageTable, bytesFor<JustFitKvPage>(kMaximumPageTableEntries));
+  put(DecodeTensor::PageTable, bytesFor<JustFitKvPage>(kMaximumPageTableEntries + 2));
   put(DecodeTensor::PenaltyState,
       bytesFor<uint32_t>(geometry.target.vocabularySize));
   put(DecodeTensor::VerifyPackedBase,

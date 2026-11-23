@@ -24,6 +24,19 @@ struct GdnParityBuffers final {
   std::vector<metal::MetalBuffer> recurrentLayers;
 };
 
+// A separately tracked, reusable convolution destination. Cached snapshots
+// never retain this scratch; only active lanes and the idle pool do.
+class QwenCommitScratch final {
+public:
+  QwenCommitScratch(metal::MetalBackend &backend,
+                    std::shared_ptr<StateAllocationTracker> tracker,
+                    uint64_t bytes);
+  ~QwenCommitScratch();
+  metal::MetalBuffer buffer;
+private:
+  std::shared_ptr<StateAllocationTracker> tracker_;
+};
+
 class QwenGdnCell final {
 public:
   ~QwenGdnCell();
@@ -80,12 +93,13 @@ struct QwenCachedBuffers final {
   std::shared_ptr<DFlashDraftRing> draft;
 };
 
-// Free buffers available for reuse: a lane takes two cells and a ring, a
-// cached state one of each. Both return them here; idle buffers are released
+// Free buffers available for reuse: a lane takes one cell, a ring and
+// convolution scratch; a cached state takes just a cell and ring. Both return them here; idle buffers are released
 // only by reclaim.
 struct QwenBufferPool final {
   std::vector<std::shared_ptr<QwenGdnCell>> cells;
   std::vector<std::shared_ptr<DFlashDraftRing>> rings;
+  std::vector<std::shared_ptr<QwenCommitScratch>> scratch;
   // Cleared when the storage goes away; late returns then just free.
   bool open = true;
 };
@@ -160,8 +174,8 @@ public:
   [[nodiscard]] const QwenLaneMetadata &metadata(uint32_t lane) const;
   // An assigned lane's buffers, read through the cells and the ring it
   // holds: current() is the GDN cell its next transition reads, next() the
-  // one that transition writes, draft() its draft ring. swapParity()
-  // exchanges current and next.
+  // convolution destination with recurrent views aliasing current; draft()
+  // is its draft ring. swapParity() records completion without exchanging cells.
   [[nodiscard]] const GdnParityBuffers &current(uint32_t lane) const;
   [[nodiscard]] const GdnParityBuffers &next(uint32_t lane) const;
   [[nodiscard]] const std::vector<DFlashDraftRingLayer> &draft(uint32_t lane) const;
@@ -179,20 +193,25 @@ public:
                   const std::function<void()> &allocateExtra = {});
   void releaseLane(uint32_t lane, uint64_t requestId);
   // Releases the lane but keeps its state where its request stopped: the
-  // current GDN cell and the draft ring move, uncopied, into a RAM state at
-  // the lane's lengths; the other cell returns to the pool. A later request
+  // current GDN cell and draft ring move, uncopied, into a RAM state at
+  // the lane's lengths; convolution scratch returns to the idle pool. A later request
   // that extends the same tokens restores it (beginRestore).
   [[nodiscard]] std::shared_ptr<const QwenCompositeState> park(uint32_t lane,
                                                                uint64_t requestId);
   // A lane that starts at length zero without a restore reads zero recurrent
   // state; its first transition overwrites the other parity.
   void clearForColdStart(uint32_t lane);
+  // Ephemeral rollback for a nonzero ANE prefill chunk. Null on admission
+  // refusal: the caller must run that chunk on the GPU without offload.
+  [[nodiscard]] std::shared_ptr<const QwenGdnCell> checkpointGdn(uint32_t lane);
+  void restoreGdn(uint32_t lane, const QwenGdnCell &checkpoint);
+  [[nodiscard]] uint64_t idleScratchBytes() const noexcept;
   // A lane whose request found a row that is not finite may hold such rows in
   // its draft rings. Draft attention weighs the ring positions a request has
   // not written by zero, so one would reach the lane's next request as
   // 0 x NaN: the rings are cleared before the lane is released. Its GDN cells
   // and context window need no such care: a start clears or overwrites the
-  // cell it reads, a transition writes the other cell before reading it, and
+  // cell it reads, and
   // rings are computed only from window rows their request wrote.
   void clearDraftRings(uint32_t lane);
 
@@ -255,6 +274,10 @@ private:
   struct Lane final {
     QwenLaneMetadata metadata;
     Buffers cells;
+    // A carried-convolution destination; recurrent views alias the one
+    // full FP32 cell and are written only after target verification.
+    GdnParityBuffers commitScratch;
+    std::shared_ptr<QwenCommitScratch> scratch;
   };
 
   [[nodiscard]] Lane &lane(uint32_t index);

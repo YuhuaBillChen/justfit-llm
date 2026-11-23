@@ -6,8 +6,37 @@
 #include "metal/abi/GDN.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <string_view>
+#include <type_traits>
+#include "metal/abi/CompactGDN.h"
+#include "metal/abi/Tq4Window.h"
 
 namespace justfit::model {
+
+inline bool compactGdnEnabled() noexcept {
+  static const bool enabled = [] {
+    const char *value = std::getenv("JUSTFIT_COMPACT_GDN");
+    return value && std::string_view(value) == "1";
+  }();
+  return enabled;
+}
+
+inline bool tq4WindowEnabled() noexcept {
+  static const bool enabled = [] {
+    const char *value = std::getenv("JUSTFIT_TQ4_WINDOW");
+    return value && std::string_view(value) == "1";
+  }();
+  return enabled;
+}
+
+inline uint32_t tq4NormCorrection() noexcept {
+  static const uint32_t mode = [] {
+    const char *value = std::getenv("JUSTFIT_TQ4_NC");
+    return value ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10) & 3u) : 0u;
+  }();
+  return mode;
+}
 
 // The taps of the GDN short convolution the kernels compute; a state cell
 // keeps the inputs of all taps but the current token's.
@@ -37,14 +66,22 @@ struct GdnStateLayout final {
     return uint64_t{layers} * convolutionLayerBytes();
   }
   [[nodiscard]] constexpr uint64_t recurrentLayerBytes() const noexcept {
+    if (!std::is_constant_evaluated() && compactGdnEnabled())
+      return alignUp(uint64_t{recurrentGroups} * JUSTFIT_COMPACT_HEAD_BYTES +
+                     uint64_t{recurrentGroups / 3} * 4096u);
     return alignUp(uint64_t{recurrentGroups} * recurrentRows *
                    recurrentColumns * sizeof(float));
   }
   [[nodiscard]] constexpr uint64_t recurrentBytes() const noexcept {
     return uint64_t{layers} * recurrentLayerBytes();
   }
-  [[nodiscard]] constexpr uint64_t cellBytes() const noexcept {
+  [[nodiscard]] constexpr uint64_t tq4WindowOffset() const noexcept {
     return convolutionBytes() + recurrentBytes();
+  }
+  [[nodiscard]] constexpr uint64_t cellBytes() const noexcept {
+    if (!std::is_constant_evaluated() && tq4WindowEnabled())
+      return tq4WindowOffset() + JUSTFIT_TQ4_WINDOW_BYTES;
+    return tq4WindowOffset();
   }
 
   bool operator==(const GdnStateLayout &) const = default;
@@ -75,7 +112,7 @@ struct DraftStateLayout final {
 
 struct CompositeStateLayout final {
   // The GDN cells a lane holds, with one draft ring.
-  static constexpr uint32_t kLaneGdnCells = 2;
+  static constexpr uint32_t kLaneGdnCells = 1;
 
   GdnStateLayout target;
   DraftStateLayout draft;
@@ -83,8 +120,13 @@ struct CompositeStateLayout final {
   [[nodiscard]] constexpr bool valid() const noexcept {
     return target.valid() && draft.valid();
   }
+  [[nodiscard]] constexpr uint64_t commitScratchBytes() const noexcept {
+    if (!std::is_constant_evaluated() && compactGdnEnabled())
+      return target.convolutionBytes() + uint64_t{target.layers} * target.recurrentGroups * 8 * 128 * sizeof(float);
+    return target.convolutionBytes();
+  }
   [[nodiscard]] constexpr uint64_t laneBytes() const noexcept {
-    return kLaneGdnCells * target.cellBytes() + draft.ringBytes();
+    return target.cellBytes() + commitScratchBytes() + draft.ringBytes();
   }
   [[nodiscard]] constexpr uint64_t cachedBytes() const noexcept {
     return target.cellBytes() + draft.ringBytes();

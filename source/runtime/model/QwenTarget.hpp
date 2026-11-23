@@ -255,6 +255,7 @@ struct QwenTargetCommitBuffers final {
   std::array<metal::MetalBuffer, ExecutionLimits::maximumBatchWidth>
       nextStates;
   metal::MetalBuffer retainedCounts;
+  metal::MetalBuffer acceptedPath{};
 };
 
 template <class Layout, class Layer>
@@ -309,6 +310,9 @@ public:
                       metal::MetalBuffer proposals,
                       metal::MetalBuffer verifyInput, uint32_t lanes) const;
   [[nodiscard]] bool hostEmbedding() const noexcept { return bool(weightsBase_.hostTokenEmbedding); }
+  // Whether a verify of `lanes` lanes can take draft trees: every GDN mixer
+  // has a tree verify kernel (ops::GDN::hasDecodeTree).
+  [[nodiscard]] bool treeVerifySupported(uint32_t lanes) const;
   void addEmbedding(metal::CommandGraph &graph, metal::MetalBuffer tokens,
                     metal::MetalBuffer hidden, uint32_t rows) const;
   void addStateCommit(metal::CommandGraph &graph,

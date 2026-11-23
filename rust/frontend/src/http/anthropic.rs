@@ -103,6 +103,20 @@ pub(super) async fn post(
     s: Service,
     body: Value,
     permit: Arc<OwnedSemaphorePermit>,
+    body_permit: super::BodyPermit,
+    received: Instant,
+    count: bool,
+) -> Result<Response> {
+    let ignored = crate::hosted_tools::ignored(&body["tools"], crate::hosted_tools::anthropic_hosted);
+    let mut response = post_inner(s, body, permit, body_permit, received, count).await?;
+    crate::hosted_tools::disclose(&mut response, &ignored);
+    Ok(response)
+}
+
+async fn post_inner(
+    s: Service,
+    body: Value,
+    permit: Arc<OwnedSemaphorePermit>,
     mut body_permit: super::BodyPermit,
     received: Instant,
     count: bool,

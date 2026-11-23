@@ -306,8 +306,9 @@ void requireRotation(const GgufFile &file, const QwenTargetDimensions &g, const 
   if (rotation.weights != repacked)
     throw GgufError("the rotation must name every quantized tensor of the target and nothing else");
   if (rotation.tables != std::set<std::string, std::less<>>{"token_embd.weight"} ||
-      file.require("token_embd.weight").type != ggml::kPQ2_0)
-    throw GgufError("the rotation's one token table must be token_embd.weight in PQ2_0");
+      (file.require("token_embd.weight").type != ggml::kPQ2_0 &&
+       file.require("token_embd.weight").type != ggml::kPTQ1_0))
+    throw GgufError("the rotation's one token table must be token_embd.weight in PQ2_0 or PTQ1_0");
 }
 
 } // namespace

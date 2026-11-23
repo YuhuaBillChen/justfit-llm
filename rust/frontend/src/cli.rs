@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, io::Read, path::{Component, Path, PathBuf}};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-pub const VERSION:&str="2.6.0";
+pub const VERSION:&str="2.7.0";
 pub(crate) fn digest(path: &Path) -> Result<String> {
     let mut input=fs::File::open(path)?;
     let mut hash=Sha256::new();let mut bytes=[0u8;65536];
@@ -67,6 +67,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         "model"=>Some(crate::model_install::run_cli(&args[1..])),
         "runtime"=>Some(crate::runtime_bundle::run_cli(&args[1..])),
         "build"=>Some(crate::cli_build::run_cli(&args[1..])),
+        "launch"=>Some(crate::cli_launch::run(&args[1..])),
         "serve" if args.len()==1 || args.get(1).is_some_and(|v|v.starts_with("--"))=>Some(crate::cli_serve::run(&args[1..])),
         "--version" if args.len()==1=>Some({println!("{VERSION}");Ok(())}),
         "verify"=>Some((|| {
@@ -91,6 +92,8 @@ pub fn select_preset(brand:&str,memory_bytes:u64)->Result<&'static str> {
     let generation:u64=suffix[..end].parse()?;
     if generation<4 {return Err(format!("{brand} is older than the tested M4 baseline; pass --node explicitly at your own risk").into());}
     if generation>6 {return Err(format!("{brand} has no tested automatic preset; pass --node explicitly").into());}
+    // 16 GB is measured on M6 only (Bonsai 2 tier); M4 and M5 keep the 24 GiB floor.
+    if generation==6 && memory_bytes>=16*1024*1024*1024 && memory_bytes<24*1024*1024*1024 {return Ok("m6-16");}
     if memory_bytes<24*1024*1024*1024 {return Err("memory is below the 24 GiB the presets require".into());}
     Ok(match generation{4=>"m4",5=>"m5",_=>"m6"})
 }
@@ -112,8 +115,12 @@ mod preset_tests {
     fn same_qualified_chip_and_memory_boundaries_as_reference() {
         for (brand,want) in [("Apple M4","m4"),("Apple M4 Pro","m4"),("Apple M5 Max","m5"),("Apple M6 Ultra","m6")] {
             assert_eq!(select_preset(brand,24<<30).unwrap(),want);
-            assert!(select_preset(brand,(24<<30)-1).is_err());
+            assert_eq!(select_preset(brand,(24<<30)-1).ok(),(want=="m6").then_some("m6-16"));
         }
         for brand in ["Intel","Apple M3 Max","Apple M7","Apple M4x","Apple M41"] {assert!(select_preset(brand,128<<30).is_err());}
+        assert_eq!(select_preset("Apple M6",16<<30).unwrap(),"m6-16");
+        assert_eq!(select_preset("Apple M6",(24<<30)-1).unwrap(),"m6-16");
+        assert!(select_preset("Apple M6",(16<<30)-1).is_err());
+        for brand in ["Apple M4","Apple M5"] {assert!(select_preset(brand,16<<30).is_err());}
     }
 }

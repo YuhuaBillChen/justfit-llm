@@ -110,7 +110,7 @@ void requireLeadingInputs(const LinearPlan &plan, const Projection &p) {
   const LinearWorkload w = plan.workload();
   const LinearTile tile = plan.configuration().tile;
   if (w.phase != LinearPhase::Prefill || w.epilogue != LinearEpilogue::Residual ||
-      (tile != LinearTile::N128 && tile != LinearTile::N256 && tile != LinearTile::GgufPrefill) || p.rotation)
+      (tile != LinearTile::N128 && tile != LinearTile::N256 && tile != LinearTile::GgufPrefill))
     throw std::invalid_argument("a view of leading inputs runs only the quantized prefill residual tiles");
 }
 
@@ -131,7 +131,7 @@ bool Projection::takesPlaneViews() const noexcept {
   if (planeInputs_) return false;
   if (layout() == WeightLayout::Affine64) return true;
   const std::vector<QuantizedSegment> &segments = blocks().segments;
-  return segments.size() == 1 && !segments.front().isFloat() && !rotation;
+  return segments.size() == 1 && !segments.front().isFloat();
 }
 
 Projection Projection::leadingRows(const metal::MetalBackend &backend, uint32_t rows) const {
@@ -152,20 +152,24 @@ Projection Projection::leadingRows(const metal::MetalBackend &backend, uint32_t 
   const QuantizedSegment &segment = blocks().segments.front();
   const QuantFormat &format = segment.format();
   const uint64_t groups = inputSize / 32;
-  return Projection(rows, inputSize,
+  Projection result(rows, inputSize,
                     BlockWeights{{QuantizedSegment::planes(segment.formatId, rows, inputSize,
                                                            view(segment.plane0, groups * format.plane0_bytes),
                                                            view(segment.plane1, groups * format.plane1_bytes),
                                                            view(segment.meta,
                                                                 groups / format.meta_groups * format.meta_bytes))}});
+  // Rows of weights stored for rotated inputs read the same rotated inputs.
+  result.rotation = rotation;
+  return result;
 }
 
 Projection Projection::leadingInputs(uint32_t inputs) const {
   requirePlaneViews(*this);
   const bool affineWeights = layout() == WeightLayout::Affine64;
   const uint32_t unit = affineWeights ? kQuantGroup : 32 * blocks().segments.front().format().meta_groups;
-  if (!inputs || inputs > inputSize || inputs % unit)
-    throw std::invalid_argument("a view of leading inputs takes whole quant groups and meta units of the projection's");
+  if (!inputs || inputs > inputSize || inputs % unit || (rotation && inputs % GGUF_ROTATION_BLOCK))
+    throw std::invalid_argument("a view of leading inputs takes whole quant groups, meta units and rotation blocks "
+                                "of the projection's");
   const auto view = [&] {
     if (affineWeights) return Projection(outputSize, inputs, affine());
     const QuantizedSegment &segment = blocks().segments.front();
@@ -175,6 +179,9 @@ Projection Projection::leadingInputs(uint32_t inputs) const {
   };
   Projection result = view();
   result.planeInputs_ = inputSize;
+  // The rotation is blockwise, so the leading inputs rotate as their blocks
+  // of the whole row do, under the leading signs.
+  result.rotation = rotation;
   return result;
 }
 
@@ -257,7 +264,10 @@ LinearInput LinearPlan::input() const noexcept {
 LinearScratchSize LinearPlan::scratchSize() const noexcept {
   if (verifyA8_) {
     const uint64_t rows = storageRows(), k = workload_.matrix.inputSize;
-    return {0,0,0,0,0,rows*k,rows*(k/64)*4,rows*(k/64)*4};
+    LinearScratchSize result{0,0,0,0,0,rows*k,rows*(k/64)*4,rows*(k/64)*4};
+    // A block projection's A8 (gguf_t2a8) still reads its rotated inputs.
+    if (workload_.weightLayout == WeightLayout::Block32) result.include(blockScratchSize());
+    return result;
   }
   if (workload_.weightLayout == WeightLayout::Block32) return blockScratchSize();
   const auto [n, k] = workload_.matrix;
@@ -594,7 +604,26 @@ LinearConfig Linear::baseline(LinearWorkload w, std::span<const Projection *cons
           groups(tiles128, lanes == 2 ? kN128M16Groups : kN128Groups)};
 }
 
+// Prism's ternary GGUF tensors (PQ2_0, PTQ1_0) in prefill: the same int8
+// activations against their 2-bit codes (kernels/prefill/gguf_t2a8.metal), on
+// the shapes of the affine selection below. Without a projection (scratch
+// sizing) any block projection of those shapes counts.
+static bool ternaryA8Selected(GpuFamilyClass family, LinearWorkload w) {
+  const char *value = std::getenv("JUSTFIT_PREFILL_A8");
+  const auto [n,k] = w.matrix;
+  if (!(family==GpuFamilyClass::Apple10 && value && std::strcmp(value,"1")==0 &&
+        w.weightLayout==WeightLayout::Block32 && w.phase==LinearPhase::Prefill)) return false;
+  return (n==17408 && k==5120 && (w.epilogue==LinearEpilogue::None || w.epilogue==LinearEpilogue::UpWithGate)) ||
+         (n==5120 && (k==17408 || k==6144) && w.epilogue==LinearEpilogue::Residual);
+}
+static bool ternaryTensor(const Projection &p) {
+  if (p.layout() != WeightLayout::Block32 || p.planeInputs()) return false;
+  const std::vector<QuantizedSegment> &segments = p.blocks().segments;
+  return segments.size() == 1 && (segments.front().formatId == GGUF_FMT_PQ20 || segments.front().formatId == GGUF_FMT_PTQ10);
+}
+
 static bool verifyA8Selected(GpuFamilyClass family, LinearWorkload w) {
+  if (w.weightLayout == WeightLayout::Block32) return ternaryA8Selected(family, w);
   const char *value = std::getenv(w.phase==LinearPhase::Decode ? "JUSTFIT_VERIFY_A8" : "JUSTFIT_PREFILL_A8");
   const auto [n,k] = w.matrix;
   if (!(family==GpuFamilyClass::Apple10 && value && std::strcmp(value,"1")==0 && w.weightLayout==WeightLayout::Affine64)) return false;
@@ -618,7 +647,11 @@ LinearPlan Linear::plan(LinearWorkload w, const Projection &p, const Projection 
   const std::array<const Projection *, 2> projections{&p, gate};
   LinearPlan plan(w, baseline(w, projections), p.destination);
   plan.rotated_ = static_cast<bool>(p.rotation);
-  plan.verifyA8_ = !p.rotation && !p.planeInputs() && p.destination == FloatOutput::BFloat16 && verifyA8Selected(family_, w);
+  plan.verifyA8_ = p.layout() == WeightLayout::Block32
+      ? ternaryTensor(p) && (!gate || (ternaryTensor(*gate) &&
+                                       gate->blocks().segments.front().formatId == p.blocks().segments.front().formatId)) &&
+            p.destination == FloatOutput::BFloat16 && ternaryA8Selected(family_, w)
+      : !p.rotation && !p.planeInputs() && p.destination == FloatOutput::BFloat16 && verifyA8Selected(family_, w);
   return plan;
 }
 
@@ -638,8 +671,11 @@ LinearScratchSize Linear::decodeScratchSize(ProjectionShape shape) const {
       w.weightLayout = shape.layout;
       bound.include(shape.layout == WeightLayout::Block32 ? ggufDecodeScratchSize(w) : plan(w).scratchSize());
     }
-  // Decode plans store at most every lane's rows.
-  if (shape.rotated) bound.rotated = rotatedBytes(shape.inputSize, kMaximumDecodeTileRows);
+  // Decode plans store at most every lane's rows: bf16 rotated rows, or the
+  // int8 rows and scales of a plan in int8 activations (gguf_rotate_int8).
+  if (shape.rotated)
+    bound.rotated = std::max(rotatedBytes(shape.inputSize, kMaximumDecodeTileRows),
+                             gguf_rotation_int8_bytes(shape.inputSize, kMaximumDecodeTileRows));
   return bound;
 }
 
@@ -651,7 +687,7 @@ LinearScratchSize Linear::prefillScratchSize(ProjectionShape shape) const {
     for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual, LinearEpilogue::UpWithGate})
       bound.include(plan({{shape.outputSize, shape.inputSize}, rows, LinearPhase::Prefill, epilogue, shape.layout})
                         .scratchSize());
-  if(shape.layout==WeightLayout::Affine64 && !shape.rotated)
+  if((shape.layout==WeightLayout::Affine64 && !shape.rotated) || shape.layout==WeightLayout::Block32)
     for(const auto epilogue:{LinearEpilogue::None,LinearEpilogue::Residual,LinearEpilogue::UpWithGate})
       bound.include(plan({{shape.outputSize,shape.inputSize},JUSTFIT_PREFILL_TOKEN_BUDGET,
                           LinearPhase::Prefill,epilogue,shape.layout}).scratchSize());

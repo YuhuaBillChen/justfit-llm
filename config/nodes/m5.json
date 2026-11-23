@@ -5,6 +5,7 @@
     "JUSTFIT_STAGED_PREFILL": "1",
     "JUSTFIT_ROTATED_VERIFY": "1",
     "JUSTFIT_PREFILL_A8": "1",
+    "JUSTFIT_DECODE_INT8": "1",
     "JUSTFIT_VERIFY_A8": "1",
     "JUSTFIT_VISION_PHASE": "1",
     "JUSTFIT_COMPACT_SOFTMAX": "1",
@@ -42,13 +43,17 @@
     "JUSTFIT_CPU_GROUP64_WEIGHTED": "0",
     "JUSTFIT_CPU_DIRECT_ZA": "0",
     "JUSTFIT_CPU_VECTOR_PANEL": "0",
-    "JUSTFIT_MIXED_DECODE_MAX_LANES": "2"
+    "JUSTFIT_MIXED_DECODE_MAX_LANES": "2",
+    "JUSTFIT_COMPACT_GDN": "1",
+    "JUSTFIT_TQ4_WINDOW": "1",
+    "JUSTFIT_TQ4_NC": "3",
+    "JUSTFIT_TREE_CONSTRAINED": "1"
   },
   "vision_phase_qualification": {
     "prefill": true,
     "decode": true
   },
-  "note": "Language-independent reference parameters; runtime and assets are provisioned locally.",
+  "note": "Language-independent reference parameters; runtime and assets are provisioned locally. Language ANE FFN split stays off on M5: re-measured 2026-11-22 with GDN compression and the TQ4 window on, it takes a 0.44 share and gains 5% on 16K prefill (513 -> 541 tok/s) and nothing on 1K, for about 600 MiB more two-lane peak.",
   "schema": 2,
   "server_arguments": [
     "--tokenizer",

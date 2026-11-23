@@ -49,6 +49,9 @@ struct QuantCoef {
   static constexpr constant QuantKind Kind = K;                                                                  \
   static constexpr constant bool ScaleInChunk = InChunk
 
+// Formats whose linear chunks decode through the threadgroup table (FmtPTQ10): quant_pair_table fills it with
+// F::chunk's spread codes of each byte, which chunk(w, c, table) reads.
+template <class F> struct quant_has_table { static constexpr constant bool value = false; };
 // Entries of a codebook format's pair table: one per index byte.
 constant constexpr uint kQuantPairTableEntries = 256;
 // Fills the threadgroup table of format F's value pairs, as half2 (staged tiles) or bfloat2 (register tiles), entry
@@ -58,6 +61,9 @@ template <class F, class T>
 inline void quant_pair_table(threadgroup T *table, uint thread_index, uint threads) {
   if constexpr (F::Kind == QuantCodebook) {
     for (uint i = thread_index; i < kQuantPairTableEntries; i += threads) table[i] = T(float2(F::value(i & 15), F::value(i >> 4)));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  } else if constexpr (quant_has_table<F>::value) {
+    for (uint i = thread_index; i < kQuantPairTableEntries; i += threads) table[i] = as_type<T>(F::tableEntry(i) | 0x3C003C00u);   // a normal exponent: half/bfloat stores keep the bits
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 }
@@ -438,6 +444,51 @@ struct FmtPQ20 {
   static uint4 codes(Chunk q) { return (uint4(q) >> uint4(0, 4, 8, 12)) & 0x00030003u; }
   static QuantCoef coef(Meta mt, ushort) { return {float2(float(as_type<half>(mt)))}; }
 };
+// PTQ1_0 (Prism ML's ternary GGUFs, ggml type 143): PQ2_0's codes and d in 1.75 bits per weight, as the native block.
+// A group's 32 codes: plane0 byte c holds slots 8c..8c+4 of chunk c as a base-3 number (digit i slot 8c + i); plane1
+// byte k (chunks 2k, 2k + 1) holds, digit by digit, slots 5 and 6 of chunk 2k, slots 5 and 6 of chunk 2k + 1 and slot
+// 7 of chunk 2k; the meta unit is the block's half d, then 4 bits per group j at bit 16 + 4j: slot 7 of chunk 1, then
+// of chunk 3, as 2-bit codes. A base-3 byte decodes through the threadgroup table quant_pair_table fills
+// (quant_has_table): entry b the spread codes of its digits (digit 0 at bit 0, 1 at 16, 2 at 4, 3 at 20, 4 at 8, as
+// slots 0..4 of PQ2_0's spread chunk), with a normal half exponent in each half so half and bfloat stores keep it.
+// A chunk needs the group's meta (chunk(w, c, meta, j, table)); formats like this one take the staged tiles only.
+// value = d * (q - 1).
+inline uint quant_ptq10_five(uint b) {
+  const uint d0 = b % 3u, b1 = b / 3u, d1 = b1 % 3u, b2 = b1 / 3u, d2 = b2 % 3u, b3 = b2 / 3u, d3 = b3 % 3u, d4 = b3 / 3u;
+  return d0 | d1 << 16 | d2 << 4 | d3 << 20 | d4 << 8;
+}
+template <class F> struct quant_meta_chunk { static constexpr constant bool value = false; };
+struct FmtPTQ10 {
+  QUANT_FORMAT(GGUF_FMT_PTQ10, QuantLinear, 1, 32, false);
+  struct Payload { uint a; uint b; }; typedef uint Chunk; typedef uint Meta;
+  static Payload load(device uchar *p0, device uchar *p1) { return {*((device uint *)p0), uint(*((device ushort *)p1))}; }
+  static Meta loadMeta(device uchar *m) { return *((device uint *)m); }
+  static uint tableEntry(uint i) { return quant_ptq10_five(i) | 0x3C003C00u; }
+  template <class T> static Chunk chunk(Payload w, ushort c, Meta meta, ushort j, threadgroup T *table) {
+    const uint five = as_type<uint>(table[(w.a >> (8 * c)) & 0xFFu]);
+    const uint rest = as_type<uint>(table[(w.b >> (8 * (c >> 1))) & 0xFFu]);
+    const uint s5 = (c & 1) ? (rest >> 4) & 3u : rest & 3u, s6 = (c & 1) ? (rest >> 20) & 3u : (rest >> 16) & 3u;
+    const uint s7 = (c & 1) ? (meta >> (16 + 4 * j + 2 * (c >> 1))) & 3u : (rest >> 8) & 3u;
+    return (five & 0x03FF03FFu) | s5 << 24 | s6 << 12 | s7 << 28;
+  }
+  // The same without a table (the ANE weight gather): base-3 digits by arithmetic.
+  static Chunk chunk(Payload w, ushort c, Meta meta, ushort j) {
+    const uint s7 = (c & 1) ? (meta >> (16 + 4 * j + 2 * (c >> 1))) & 3u : 0u;
+    return chunk(w, c) | s7 << 28;
+  }
+  // Kernels without the group's meta (the register tiles) never run this format; these decode
+  // slots 0..6 and leave the meta-held slot 7 of chunks 1 and 3 at code 0 so they compile.
+  static Chunk chunk(Payload w, ushort c) {
+    const uint five = quant_ptq10_five((w.a >> (8 * c)) & 0xFFu), rest = quant_ptq10_five((w.b >> (8 * (c >> 1))) & 0xFFu);
+    const uint s5 = (c & 1) ? (rest >> 4) & 3u : rest & 3u, s6 = (c & 1) ? (rest >> 20) & 3u : (rest >> 16) & 3u;
+    return five | s5 << 24 | s6 << 12 | ((c & 1) ? 0u : (rest >> 8) & 3u) << 28;
+  }
+  static Chunk loadChunk(device uchar *p0, device uchar *p1, ushort c) { return chunk(load(p0, p1), c); }
+  static uint4 codes(Chunk q) { return (uint4(q) >> uint4(0, 4, 8, 12)) & 0x00030003u; }
+  static QuantCoef coef(Meta mt, ushort) { return {float2(float(as_type<half>(ushort(mt & 0xFFFFu))))}; }
+};
+template <> struct quant_has_table<FmtPTQ10> { static constexpr constant bool value = true; };
+template <> struct quant_meta_chunk<FmtPTQ10> { static constexpr constant bool value = true; };
 
 #undef QUANT_FORMAT
 
@@ -445,7 +496,7 @@ struct FmtPQ20 {
 #define QUANT_FORMATS(X)                                                                                            \
   X(FmtQ4K, q4k) X(FmtIQ4XS, iq4xs) X(FmtIQ4NL, iq4nl) X(FmtQ5K, q5k) X(FmtQ6K, q6k) X(FmtQ3K, q3k) X(FmtQ80, q80) \
   X(FmtIQ3S, iq3s) X(FmtQ2K, q2k) X(FmtIQ3XXS, iq3xxs) X(FmtIQ2XXS, iq2xxs) X(FmtIQ2XS, iq2xs) X(FmtIQ2S, iq2s)      \
-  X(FmtIQ1S, iq1s) X(FmtIQ1M, iq1m) X(FmtQ40, q40) X(FmtQ41, q41) X(FmtMXFP4, mxfp4) X(FmtPQ20, pq20)
+  X(FmtIQ1S, iq1s) X(FmtIQ1M, iq1m) X(FmtQ40, q40) X(FmtQ41, q41) X(FmtMXFP4, mxfp4) X(FmtPQ20, pq20) X(FmtPTQ10, ptq10)
 
 // Runs body(F()) with the format type of run-time format id `format` (GGUF_FMT_*), for kernels whose tiles pick
 // their tensor, and so its format, at run time. The branch is uniform in a threadgroup. The host passes known ids

@@ -16,6 +16,33 @@ use std::{
 fn hex(s: &str, n: usize) -> bool {
     s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
+/// Whether a cached snapshot holds a usable model: a packed package, a GGUF
+/// file, or a config
+/// with every weight shard it names (MLX targets, DFlash2 drafts).
+fn complete_snapshot(snapshot: &Path, paths: &[(String, PathBuf)]) -> bool {
+    let has = |name: &str| paths.iter().any(|(n, _)| n == name);
+    // A packed JustFit package (manifest.json) is verified file by file later.
+    if has("manifest.json") || paths.iter().any(|(n, _)| n.ends_with(".gguf")) {
+        return true;
+    }
+    if !has("config.json") {
+        return false;
+    }
+    if has("model.safetensors") {
+        return true;
+    }
+    let Ok(text) = fs::read_to_string(snapshot.join("model.safetensors.index.json")) else {
+        return false;
+    };
+    let Ok(index) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let Some(map) = index["weight_map"].as_object() else {
+        return false;
+    };
+    let shards: BTreeSet<&str> = map.values().filter_map(Value::as_str).collect();
+    !shards.is_empty() && shards.iter().all(|s| has(s))
+}
 fn encode(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
@@ -63,25 +90,48 @@ impl Repository {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .https_only(true)
             .tls_config(tls)
-            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .timeout_connect(Some(std::time::Duration::from_secs(15)))
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
             .build()
             .into();
-        let info =
-            match download::metadata_with(&agent, &url, 64 * 1024 * 1024, credential.as_deref()) {
-                Ok(bytes) => serde_json::from_slice::<Value>(&bytes)?,
-                Err(error) => {
-                    return Self::cached(
-                        id,
-                        revision,
-                        &[
-                            root,
-                            install::hub_cache()?
-                                .join(format!("models--{}", id.replace('/', "--"))),
-                        ],
-                    )
-                    .map_err(|_| error)
+        let caches = [
+            root.clone(),
+            install::hub_cache()?.join(format!("models--{}", id.replace('/', "--"))),
+        ];
+        // With a complete local copy, a few short retries before using it;
+        // without one, the same five-minute retries as the file downloads.
+        let fetch = || download::metadata_with(&agent, &url, 64 * 1024 * 1024, credential.as_deref());
+        let fetched = if Self::cached(id, revision, &caches).is_ok() {
+            let mut attempt = 0;
+            loop {
+                match fetch() {
+                    Err(error) if attempt < 2 && download::transient(&error.to_string()) => {
+                        attempt += 1;
+                        eprintln!("Hub metadata for {id}: {error}; retrying ({attempt}/2)");
+                        std::thread::sleep(std::time::Duration::from_secs(2 * attempt));
+                    }
+                    other => break other,
                 }
-            };
+            }
+        } else {
+            download::retrying(fetch)
+        };
+        let info = match fetched {
+            Ok(bytes) => serde_json::from_slice::<Value>(&bytes)?,
+            Err(error) => {
+                // Fall back only to a cached snapshot that is complete; keep the
+                // network error when none is.
+                return Self::cached(id, revision, &caches)
+                .map_err(|_| -> Box<dyn std::error::Error> {
+                    format!(
+                        "could not read {id} from Hugging Face ({error}) and no complete local copy exists; \
+                         check the network or HF_TOKEN and retry (finished files are kept), \
+                         or pass local directories with --model and --draft-model"
+                    )
+                    .into()
+                });
+            }
+        };
         let commit = info["sha"]
             .as_str()
             .filter(|s| hex(s, 40))
@@ -174,6 +224,11 @@ impl Repository {
                 Ok(())
             }
             walk(&snapshot, &snapshot, &mut paths)?;
+            // An interrupted download leaves an empty or partial snapshot:
+            // skip it so that a complete copy in another root is still found.
+            if !complete_snapshot(&snapshot, &paths) {
+                continue;
+            }
             let mut files = BTreeMap::new();
             for (name, path) in paths {
                 let resolved = path.canonicalize()?;
@@ -241,7 +296,7 @@ impl Repository {
         if source_stamp(&fs::metadata(path)?)!=stamp{return Err("cached source changed while verifying; owner data preserved".into());}
         self.verified.borrow_mut().insert(name.into(),stamp);Ok(())
     }
-    fn file(&self,name:&str)->Result<PathBuf>{self.file_with(name,download::metadata,download::fetch_resumable_authenticated)}
+    fn file(&self,name:&str)->Result<PathBuf>{self.file_with(name,|url,limit,token|download::retrying(||download::metadata(url,limit,token)),download::fetch_resumable_authenticated)}
     fn file_with(&self,name:&str,small:impl FnOnce(&str,u64,Option<&str>)->Result<Vec<u8>>,large:impl FnOnce(&str,&Path,u64,&str,Option<&str>)->Result<u64>)->Result<PathBuf>{
         let entry = self
             .files
@@ -589,10 +644,8 @@ pub fn resolve(
                 .values()
                 .map(|t| t.kind)
                 .collect::<BTreeSet<_>>();
-            for (priority, kind) in [(0, 30), (1, 0), (2, 1)] {
-                if types == BTreeSet::from([kind]) {
-                    candidates.push((priority, name.clone(), meta.vision_config()?));
-                }
+            if let Some(priority) = projector_priority(&types) {
+                candidates.push((priority, name.clone(), meta.vision_config()?));
             }
         }
         candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -686,6 +739,15 @@ pub fn resolve(
     }
     Ok(model)
 }
+/// Same tensor rule as a local --mmproj (F32, F16 or BF16; F32 norms and
+/// biases may sit beside BF16 or F16 weights). BF16 first, then F32, then F16.
+fn projector_priority(types: &BTreeSet<u32>) -> Option<u8> {
+    if types.is_empty() || !types.iter().all(|kind| matches!(kind, 0 | 1 | 30)) {
+        return None;
+    }
+    Some(if types.contains(&30) { 0 } else if types.contains(&1) { 2 } else { 1 })
+}
+
 pub fn select_gguf(files: Vec<String>, variant: Option<&str>) -> Result<Vec<String>> {
     let candidates = files
         .iter()
@@ -770,6 +832,15 @@ pub fn select_gguf(files: Vec<String>, variant: Option<&str>) -> Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_precision_projectors_follow_the_local_rule() {
+        let set = |kinds: &[u32]| kinds.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(projector_priority(&set(&[0, 30])), Some(0));
+        assert_eq!(projector_priority(&set(&[30])), Some(0));
+        assert_eq!(projector_priority(&set(&[0])), Some(1));
+        assert_eq!(projector_priority(&set(&[0, 1])), Some(2));
+        assert_eq!(projector_priority(&set(&[0, 1, 8])), None);
+    }
     #[test]
     fn variants_choose_exact_suffix_and_complete_splits() {
         let files = ["M-UD-Q4_K_M.gguf", "M-Q4_K_M.gguf", "mmproj-BF16.gguf"]
@@ -867,4 +938,20 @@ mod digest_tests {
   let (_stage,repo)=fixture("config.json",b"{}",true);let path=repo.snapshot.join("config.json");fs::write(&path,b"{}").unwrap();repo.file("config.json").unwrap();let replacement=repo.snapshot.join("replacement");fs::write(&replacement,b"[]").unwrap();fs::rename(replacement,&path).unwrap();assert!(repo.file("config.json").unwrap_err().to_string().contains("checksum"));assert_eq!(fs::read(path).unwrap(),b"[]");
  }
 
+ fn cached_root(stage:&Path,name:&str,files:&[(&str,&[u8])])->PathBuf{let root=stage.join(name);let commit="b".repeat(40);fs::create_dir_all(root.join("refs")).unwrap();fs::write(root.join("refs/main"),&commit).unwrap();let snap=root.join("snapshots").join(&commit);fs::create_dir_all(&snap).unwrap();for (f,b) in files{fs::write(snap.join(f),b).unwrap();}root}
+ #[test]fn empty_or_partial_cache_is_skipped_and_a_complete_one_is_found(){
+  let stage=Stage::new(&std::env::temp_dir().canonicalize().unwrap(),"source-cache-test").unwrap();
+  let empty=cached_root(stage.path(),"empty",&[]);
+  let partial=cached_root(stage.path(),"partial",&[("config.json",b"{}"),("model.safetensors.index.json",br#"{"weight_map":{"a":"m-1.safetensors","b":"m-2.safetensors"}}"#),("m-1.safetensors",b"x")]);
+  let full=cached_root(stage.path(),"full",&[("config.json",b"{}"),("model.safetensors",b"w")]);
+  let gguf=cached_root(stage.path(),"gguf",&[("model-Q4.gguf",b"g")]);
+  assert!(Repository::cached("o/m","main",&[empty.clone()]).is_err());
+  assert!(Repository::cached("o/m","main",&[partial.clone()]).is_err());
+  let repo=Repository::cached("o/m","main",&[empty,partial,full.clone()]).unwrap();assert_eq!(repo.root,full);
+  assert!(Repository::cached("o/m","main",&[gguf]).is_ok());
+ }
+ #[test]fn transient_errors_are_retried_and_permanent_ones_are_not(){
+  for m in ["HTTPS download failed: timed out","download HTTP status 503","download HTTP status 429","HTTPS body read failed"]{assert!(download::transient(m),"{m}");}
+  for m in ["download HTTP status 404","download HTTP status 401","source Hub commit missing"]{assert!(!download::transient(m),"{m}");}
+ }
 }

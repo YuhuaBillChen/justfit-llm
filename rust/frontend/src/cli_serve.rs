@@ -15,9 +15,31 @@ fn size(text: &str) -> Result<u64> {
     let unit=match &text[end..] {""|"B"=>1,"K"|"KiB"=>1024,"M"|"MiB"=>1024*1024,"G"|"GiB"=>1024*1024*1024,_=>return Err(format!("invalid size: {text}").into())};
     number.checked_mul(unit).ok_or_else(||format!("size overflow: {text}").into())
 }
-fn preset(root: &Path,node: &str,model: &Path,port:u16,state: &Path,frontend: &Path,profile: Option<&Path>) -> Result<Value> {
+/// Hub GGUF specs keep their ID; a local file is named by its stem.
+fn gguf_name(source: &str) -> String {
+    if source.starts_with('/') {Path::new(source).file_stem().map(|stem|stem.to_string_lossy().into_owned()).unwrap_or_else(||source.to_string())} else {source.to_string()}
+}
+
+/// `m6-16` is the m6 preset with its `memory_16` tier (16 GB Macs: Bonsai, smaller budget).
+pub(crate) fn preset_node(name: &str) -> (&str,bool) {if name=="m6-16" {("m6",true)} else {(name,false)}}
+
+fn memory_tier(root: &Path,node: &str) -> Result<Value> {
     let preset:Value=serde_json::from_slice(&std::fs::read(root.join(format!("config/nodes/{node}.json")))?)?;
+    preset.get("memory_16").filter(|tier|tier.is_object()).cloned().ok_or_else(||format!("{node} has no 16 GB preset").into())
+}
+
+fn preset(root: &Path,node: &str,small: bool,model: &Path,port:u16,state: &Path,frontend: &Path,profile: Option<&Path>) -> Result<Value> {
+    let mut preset:Value=serde_json::from_slice(&std::fs::read(root.join(format!("config/nodes/{node}.json")))?)?;
     if preset["schema"]!=2 || preset["node"]!=node {return Err("invalid node preset schema or identity".into());}
+    if small {
+        let tier=memory_tier(root,node)?;
+        for (key,value) in tier["environment"].as_object().ok_or("invalid 16 GB environment")? {preset["environment"][key]=value.clone();}
+        let arguments=preset["server_arguments"].as_array_mut().ok_or("invalid node server arguments")?;
+        for (flag,value) in tier["server_arguments"].as_object().ok_or("invalid 16 GB server arguments")? {
+            let index=arguments.iter().position(|argument|argument==flag).ok_or_else(||format!("16 GB preset overrides a missing option: {flag}"))?;
+            arguments[index+1]=value.clone();
+        }
+    }
     let command=preset["server_arguments"].as_array().ok_or("invalid node server arguments")?;
     let replacements=[("{release}",root.display().to_string()),("{model}",model.display().to_string()),("{port}",port.to_string()),("{cache}",state.join("cache").display().to_string())];
     let mut flags=BTreeMap::new();let mut index=0;
@@ -74,13 +96,14 @@ pub fn run(args: &[String]) -> Result<()> {
         return Err(command.exec().into());
     }
     let args=filtered.as_slice();
-    let mut flags=BTreeMap::new();let mut ane_bundles=vec![];let mut ane_pins=vec![];let mut dry=false;let mut no_ane=false;let mut language_only=false;let mut offline=false;let mut index=0;
+    let mut flags=BTreeMap::new();let mut ane_bundles=vec![];let mut ane_pins=vec![];let mut dry=false;let mut no_ane=false;let mut ane_compile=false;let mut language_only=false;let mut offline=false;let mut index=0;
     while index<args.len() {
         let flag=args[index].as_str();
         if flag=="--dry-run" {dry=true;index+=1;continue;}
         if flag=="--language-only" {language_only=true;index+=1;continue;}
         if flag=="--offline" {offline=true;index+=1;continue;}
         if flag=="--no-ane-vision" {no_ane=true;index+=1;continue;}
+        if flag=="--ane-compile" {ane_compile=true;index+=1;continue;}
         if !["--project","--node","--model","--revision","--draft-model","--mmproj","--jobs","--metal-bin","--port","--state-dir","--vision-profile","--runtime-bundle","--runtime-manifest","--runtime-sha256","--ane-bundle","--ane-sha256","--ane-manifest","--ane-manifest-sha256"].contains(&flag) {return Err(format!("unknown serve option: {flag}").into());}
         let value=args.get(index+1).ok_or_else(||format!("{flag} needs a value"))?;
         if flag=="--ane-bundle"{ane_bundles.push(value.clone());}else if flag=="--ane-sha256"{ane_pins.push(value.clone());}else if flags.insert(flag,value.as_str()).is_some() {return Err(format!("duplicate serve option: {flag}").into());}
@@ -88,8 +111,11 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let root=match flags.get("--project") {Some(path)=>absolute(path)?,None=>crate::cli::default_project()?};
     let node=match flags.get("--node"){Some(node)=>*node,None=>crate::cli::detect_preset()?};
-    if !["m4","m5","m6"].contains(&node) {return Err("node must be m4, m5 or m6".into());}
-    let model_spec=flags.get("--model").copied().unwrap_or(crate::model_install::DEFAULT_MODEL);
+    if !["m4","m5","m6","m6-16"].contains(&node) {return Err("node must be m4, m5, m6 or m6-16".into());}
+    let (node,small)=preset_node(node);
+    // On a first start the workspace does not exist yet: read the preset from the installed payload.
+    let small_model=if small {let preset_root=if root.exists(){root.clone()}else{crate::cli::payload_root()?};Some(memory_tier(&preset_root,node)?["model"].as_str().ok_or("invalid 16 GB model")?.to_string())} else {None};
+    let model_spec=flags.get("--model").copied().or(small_model.as_deref()).unwrap_or(crate::model_install::DEFAULT_MODEL);
     let revision=flags.get("--revision").copied();
     if revision.is_some_and(|value|!crate::model_install::safe_path(value)){return Err("invalid model revision".into());}
     let jobs:usize=flags.get("--jobs").copied().unwrap_or("4").parse().map_err(|_|"--jobs must be positive")?;
@@ -102,6 +128,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let ane_requested=!ane_bundles.is_empty()||ane_manifest.is_some();
     if language_only&&(flags.contains_key("--vision-profile")||ane_requested){return Err("--language-only cannot load vision assets or a vision profile".into());}
     if language_only{no_ane=true;}
+    if ane_compile&&no_ane{return Err("--ane-compile cannot be combined with --no-ane-vision or --language-only".into());}
     if no_ane && (flags.contains_key("--vision-profile")||ane_requested) {return Err("--no-ane-vision cannot be combined with ANE vision assets or a profile".into());}
     if flags.contains_key("--vision-profile")&&ane_requested{return Err("choose an existing vision profile or precompiled ANE assets".into());}
     let bundle=flags.get("--runtime-bundle");let manifest=flags.get("--runtime-manifest");let pin=flags.get("--runtime-sha256");
@@ -116,7 +143,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let automatic=root.join("local-state/ane").join(node).join("qualified/tiered.json");
     let mut profile=if no_ane {None}else if let Some(path)=flags.get("--vision-profile") {Some(absolute(path)?)}else{automatic.is_file().then_some(automatic)};
     let frontend=std::env::current_exe()?;
-    if dry {let model=absolute(model_spec)?;let mut plan=preset(&root,node,&model,port,&state,&frontend,profile.as_deref())?;if language_only{plan["config"]["vision"]=Value::Null;}options.apply(&mut plan,true)?;println!("{}",serde_json::to_string_pretty(&plan)?);return Ok(());}
+    if dry {let model=absolute(model_spec)?;let mut plan=preset(&root,node,small,&model,port,&state,&frontend,profile.as_deref())?;if language_only{plan["config"]["vision"]=Value::Null;}options.apply(&mut plan,true)?;println!("{}",serde_json::to_string_pretty(&plan)?);return Ok(());}
     crate::cli_platform::require_mac()?;
     if let Some(path)=bundle {crate::runtime_bundle::install(&root,&absolute(path)?,pin.unwrap())?;}
     if let Some(url)=manifest {crate::runtime_bundle::fetch_and_install(&root,url,pin.unwrap())?;}
@@ -164,13 +191,13 @@ pub fn run(args: &[String]) -> Result<()> {
         profile=None;
     }
     let delivery=if native_vision&&!no_ane&&!ane_requested&&profile.is_none() {
-        crate::ane_distribution::discover(&root,node,&model)?
+        crate::ane_distribution::discover(&root,node,&model,ane_compile)?
     }else{None};
     if delivery.is_some(){profile=None;}
     if native_vision&&(ane_requested||(!no_ane&&profile.is_none()&&delivery.is_none())){
         if let Some(prepared)=crate::ane_bundle::install_options(&root,node,&model,&ane_bundles,&ane_pins,ane_manifest,ane_manifest_pin)?{profile=Some(prepared);}
     }
-    let mut plan=preset(&root,node,&model,port,&state,&frontend,profile.as_deref())?;
+    let mut plan=preset(&root,node,small,&model,port,&state,&frontend,profile.as_deref())?;
     if let Some(delivery)=delivery{
         let worker=root.join("source/build/JustFitVision.app/Contents/MacOS/justfit-ane-worker");
         if !worker.is_file(){return Err("native ANE worker missing from runtime".into());}
@@ -185,6 +212,12 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     if !media_enabled{plan["config"]["vision"]=Value::Null;}
     if !model_spec.starts_with(['/', '.', '~'])&&!std::path::Path::new(model_spec).is_dir(){plan["config"]["model"]=json!(model_spec);}
+    let record=if model.join("model.json").is_file(){Some(crate::source_mlx::read_json(&model.join("model.json"))?)}else{None};
+    if let Some(source)=record.as_ref().filter(|record|record["target_format"]=="gguf").and_then(|record|record["model"].as_str()) {
+        // The preset names the MLX checkpoint and its Splash alias; a GGUF model reports its own name.
+        plan["config"]["served_model_names"]=json!([]);
+        if plan["config"]["model"]==crate::model_install::DEFAULT_MODEL {plan["config"]["model"]=json!(gguf_name(source));}
+    }
     options.apply(&mut plan,false)?;
     for name in ["cache","ane-meter"] {std::fs::create_dir_all(state.join(name))?;}
     for (name,_) in std::env::vars_os() {
@@ -195,4 +228,13 @@ pub fn run(args: &[String]) -> Result<()> {
     std::env::set_current_dir(root.join("source"))?;
     let config=serde_json::from_value(plan["config"].clone())?;
     tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build()?.block_on(crate::http::serve(config))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gguf_models_report_their_own_name() {
+        assert_eq!(super::gguf_name("/models/Ternary-Bonsai-2-27B-PTQ1_0.gguf"),"Ternary-Bonsai-2-27B-PTQ1_0");
+        assert_eq!(super::gguf_name("prism-ml/Ternary-Bonsai-2-27B-gguf:PTQ1_0"),"prism-ml/Ternary-Bonsai-2-27B-gguf:PTQ1_0");
+    }
 }

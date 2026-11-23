@@ -45,6 +45,9 @@ struct ModelMemoryFootprint final {
   // without one.
   uint64_t aneFfnBytes = 0;
   bool elasticPrefill = false;
+  // A finished request's parked state, held while the next turn that
+  // adopts it starts its own lane (JUSTFIT_PARKED); zero without parking.
+  uint64_t adoptedStateBytes = 0;
 };
 
 struct ModelMemoryProfile final {

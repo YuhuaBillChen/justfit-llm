@@ -1,10 +1,10 @@
 name: Publish JustFit
-# The 2.6 wheel is built, signed and tested on Apple silicon outside CI. This
+# The wheel is built, signed and tested on Apple silicon outside CI. This
 # workflow publishes those exact bytes: it checks the repository source against
 # the wheel's pinned manifest, takes the wheel attached to the GitHub Release,
 # verifies its SHA-256 and uploads it with PyPI trusted publishing.
 # Run it from the release tag (Actions > Publish JustFit > Use workflow from
-# tag v2.6.0) after the GitHub Release with the wheel exists.
+# tag v2.7.0) after the GitHub Release with the wheel exists.
 on:
   workflow_dispatch:
     inputs:
@@ -17,9 +17,9 @@ on:
 permissions:
   contents: read
 env:
-  VERSION: 2.6.0
-  WHEEL: justfit_llm-2.6.0-py3-none-macosx_26_0_arm64.whl
-  WHEEL_SHA256: a3ef01420bb6ca44f98fa9409583357fa6a3761befd562780b9172331656584a
+  VERSION: 2.7.0
+  WHEEL: justfit_llm-2.7.0-py3-none-macosx_26_0_arm64.whl
+  WHEEL_SHA256: 5e7095010aaa0b09b424a451590ffc2a471944bf260a6d2299dad5123b50ae09
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -46,7 +46,7 @@ jobs:
           python3 - <<'PYCODE'
           import hashlib, json, os, zipfile
           wheel = zipfile.ZipFile('dist/' + os.environ['WHEEL'])
-          root = 'justfit_llm-2.6.0.data/data/share/justfit-llm/'
+          root = 'justfit_llm-2.7.0.data/data/share/justfit-llm/'
           shipped = json.loads(wheel.read(root + 'package-manifest.json'))
           assert shipped == json.load(open('package-manifest.json')), 'package-manifest.json differs from the wheel'
           checked = 0

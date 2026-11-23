@@ -89,7 +89,7 @@ void Sampling::addPenalties(metal::CommandGraph &graph,
                             std::span<const SamplingPolicy> policies,
                             const SamplingBuffers &buffers,
                             const PenaltyTable &table, uint32_t rowOffset,
-                            bool verify) const {
+                            bool verify, const JustFitTreeBatch *treeBatch) const {
   SamplingPenaltyParams params{};
   params.vocabulary = vocabulary_;
   params.rows = verify ? activeVerifyRows() : 1;
@@ -112,6 +112,24 @@ void Sampling::addPenalties(metal::CommandGraph &graph,
         1.0F / penalties.repetition, std::numeric_limits<float>::max());
     params.presence[entry] = penalties.presence;
     params.frequency[entry] = penalties.frequency;
+    for (uint32_t row = 0; row < 16; ++row)
+      params.history[entry][row] = (2u << row) - 2u;
+    if (treeBatch) {
+      if (lane >= 2)
+        throw std::invalid_argument("draft trees take at most two lanes");
+      const JustFitTreeLane &tree = treeBatch->lane[lane];
+      if (tree.rows > JUSTFIT_TREE_MAXIMUM_ROWS)
+        throw std::invalid_argument("invalid draft tree rows");
+      for (uint32_t row = 0; row < 16; ++row) {
+        uint32_t bits = 0;
+        for (uint32_t node = row; row < tree.rows && node != 0; node = tree.parent[node]) {
+          if (tree.parent[node] >= node)
+            throw std::invalid_argument("draft tree parent is not an earlier row");
+          bits |= 1u << node;
+        }
+        params.history[entry][row] = bits;
+      }
+    }
   }
   if (!params.entries)
     return;
@@ -150,7 +168,8 @@ void Sampling::addVerify(metal::CommandGraph &graph,
                          std::span<const SamplingPolicy> policies,
                          SamplingBuffers buffers, uint32_t stopToken0,
                          uint32_t stopToken1,
-                         const PenaltyTable &penalties, bool tree) const {
+                         const PenaltyTable &penalties, bool tree,
+                         const JustFitTreeBatch *treeBatch) const {
   if (policies.empty() || policies.size() > kMaximumLanes)
     throw std::invalid_argument("invalid sampling batch width");
   // Verify row r of a lane reads mask row r + 1 and, below the last row,
@@ -167,7 +186,7 @@ void Sampling::addVerify(metal::CommandGraph &graph,
     requireBytes(buffers.uniforms, (policies.size() * JUSTFIT_SAMPLING_UNIFORMS) * sizeof(float),
                  "tree sampling uniform");
   }
-  addPenalties(graph, policies, buffers, penalties, 0, true);
+  addPenalties(graph, policies, buffers, penalties, 0, true, treeBatch);
   addSelection(graph, params, static_cast<uint32_t>(policies.size()), buffers);
 }
 

@@ -82,6 +82,7 @@ impl Options {
             "--max-cache-disk",
             "--cache-dir",
             "--default-reasoning-effort",
+            "--tool-policy",
             "--max-request-size",
             "--max-image-pixels",
             "--request-timeout",
@@ -192,6 +193,9 @@ impl Options {
                 }
                 "--cache-dir" if value.trim().is_empty() => {
                     return Err("cache directory must not be empty".into())
+                }
+                "--tool-policy" => {
+                    crate::hosted_tools::parse_policy(value)?;
                 }
                 _ => (),
             }
@@ -320,6 +324,7 @@ impl Options {
                 "--default-reasoning-effort" => {
                     plan["config"]["default_reasoning_effort"] = json!(value)
                 }
+                "--tool-policy" => plan["environment"]["JUSTFIT_TOOL_POLICY"] = json!(value),
                 "--max-image-pixels" => {
                     let pixels = value.parse::<usize>()?;
                     plan["config"]["max_image_pixels"] = json!(pixels);

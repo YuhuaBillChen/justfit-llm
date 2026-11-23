@@ -4,6 +4,7 @@ mod anthropic;
 mod scoring;
 mod body_budget;
 mod shutdown;
+mod ollama;
 pub mod connections;
 use body_budget::Permit as BodyPermit;
 pub fn responses_fixture(body: &Value) -> Value {
@@ -209,6 +210,7 @@ async fn handler(State(s): State<Service>, r: Request) -> Response {
         info.0.body(unread,Duration::from_secs_f64(30.+unread.min(s.limit) as f64/(512.*1024.)));
     }
     let messages=normalize_path(r.uri().path()).starts_with("/v1/messages");
+    let ollama_api=normalize_path(r.uri().path()).starts_with("/api/");
     let systemone=normalize_path(r.uri().path())=="/v1/systemone";
     let allowed = s.access.allowed_origin(r.headers());
     let preflight = (r.method() == "OPTIONS").then(|| r.headers().clone());
@@ -227,6 +229,7 @@ async fn handler(State(s): State<Service>, r: Request) -> Response {
         Ok(r) => r,
         Err(e) if messages=>{let payload=anthropic::error_payload(&e);let mut response=response_error(e);*response.body_mut()=Body::from(safe_json(&payload));response},
         Err(mut e) if systemone&&e.0==503=>{e.0=529;response_error(e)},
+        Err(e) if ollama_api=>{let payload=ollama::error_body(&e);let mut response=response_error(e);*response.body_mut()=Body::from(payload);response},
         Err(e) => response_error(e),
     };
     let preflight = preflight.as_ref().filter(|_| response.status() == StatusCode::NO_CONTENT);
@@ -285,6 +288,9 @@ async fn handle(s: Service, r: Request) -> Result<Response> {
                 [("content-type", "text/html; charset=utf-8")],
                 include_bytes!("../../../source/server/chat.html").as_slice(),
             ).into_response(),
+            // Ollama clients send `HEAD /` as a heartbeat and some detect the
+            // server by this exact text (the chat page answers 200 too).
+            "/" => ([("content-type", "text/plain; charset=utf-8")], "Ollama is running").into_response(),
             "/favicon.ico" if s.webui => (
                 [("content-type", "image/svg+xml")],
                 include_bytes!("../../../source/server/favicon.svg").as_slice(),
@@ -302,6 +308,9 @@ async fn handle(s: Service, r: Request) -> Result<Response> {
                 }
             }
             "/status" => reply(s.status().await?),
+            "/api/version" => ollama::version(),
+            "/api/tags" => ollama::tags(&s),
+            "/api/ps" => ollama::ps(&s),
             "/metrics" => ([("content-type","text/plain; version=0.0.4; charset=utf-8")],crate::telemetry::prometheus(&s.status().await?)).into_response(),
             "/v1/models" => {
                 let data = models.unwrap();
@@ -329,6 +338,9 @@ async fn handle(s: Service, r: Request) -> Result<Response> {
         "/v1/messages/count_tokens",
         "/v1/judgments",
         "/v1/systemone",
+        "/api/chat",
+        "/api/generate",
+        "/api/show",
     ]
     .contains(&path.as_str())
     {
@@ -366,12 +378,14 @@ async fn handle(s: Service, r: Request) -> Result<Response> {
             "invalid_request_error".into(),
         ));
     }
-    let mime = header(r.headers(), "content-type")?
+    let mime = if path.starts_with("/api/") && !r.headers().contains_key("content-type") {
+        "application/json".to_string()
+    } else { header(r.headers(), "content-type")?
         .split(';')
         .next()
         .unwrap_or("")
         .trim()
-        .to_lowercase();
+        .to_lowercase() };
     if mime != "application/json" && !(mime.starts_with("application/") && mime.ends_with("+json"))
     {
         return Err(ApiError(
@@ -448,6 +462,9 @@ async fn route(s: Service, body: Value, path: String, permit: Arc<OwnedSemaphore
     }
     if path == "/v1/responses" {
         return responses::post(s, body, permit, _body_permit, received).await;
+    }
+    if path.starts_with("/api/") {
+        return ollama::post(s, body, path, permit, _body_permit, received).await;
     }
     if path == "/tokenize" || path == "/apply-template" {
         if path=="/apply-template"&&crate::vision::has_media(&body)&&s.vision.is_none(){return Err(crate::vision::unavailable())}

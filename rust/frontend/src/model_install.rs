@@ -225,7 +225,7 @@ pub fn resolve(project:&Path,spec:&str,revision:Option<&str>)->Result<PathBuf> {
     if hex(revision,40)||offline {if let Some(path)=cached(project,spec,revision)?{return Ok(path);}}
     if offline{return Err("model is not present in the offline model caches".into());}
     let credential=token();
-    resolve_remote(project,spec,revision,|url,limit|download::metadata(url,limit,credential.as_deref()),|url,path,size,sha|download::fetch_resumable_authenticated(url,path,size,sha,credential.as_deref()))
+    resolve_remote(project,spec,revision,|url,limit|download::retrying(||download::metadata(url,limit,credential.as_deref())),|url,path,size,sha|download::fetch_resumable_authenticated(url,path,size,sha,credential.as_deref()))
 }
 fn resolve_remote(project:&Path,spec:&str,revision:&str,mut metadata:impl FnMut(&str,u64)->Result<Vec<u8>>,transfer:impl FnMut(&str,&Path,u64,&str)->Result<u64>)->Result<PathBuf> {
     repository(spec)?;if !safe_path(revision){return Err("invalid model revision".into());}

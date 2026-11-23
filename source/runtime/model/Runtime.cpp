@@ -192,6 +192,26 @@ using metal::CommandTiming;
 using metal::MetalBackend;
 using metal::MetalBuffer;
 
+// Compressed GDN's verify attention scratch at its largest: two lanes of 16
+// rows or four of 8, each at the maximum split count. Allocated with the
+// runtime and counted in the memory plan, so a long request never meets a
+// refused allocation when it starts to decode.
+uint64_t compactVerifyBytes(const RuntimeGeometry &geometry) {
+  const uint64_t rows = std::max<uint64_t>(2 * 16, uint64_t{kLaneCount} * 8);
+  return rows * kv::kVerifyMaximumSplits * geometry.target.attentionQueryHeads *
+         (geometry.target.attentionHeadDimension + 2) * sizeof(float);
+}
+
+class RejectedDecodeTicket final : public ModelBatchTicket {
+public:
+  explicit RejectedDecodeTicket(std::vector<ModelStepResult> results) : results_(std::move(results)) {}
+  double wallMilliseconds() const noexcept override { return 0; }
+  bool ready() const noexcept override { return true; }
+  std::vector<ModelStepResult> wait() override { return std::move(results_); }
+private:
+  std::vector<ModelStepResult> results_;
+};
+
 class DeferredMetalTicket final : public ModelBatchTicket {
 public:
   // Runs once the command has completed, and may add work of its own to its
@@ -434,6 +454,8 @@ struct Runtime::Impl {
     uint32_t accepted = 0;
     uint32_t currentAnchor = 0;
     uint32_t maximumRetained = 0;
+    // JUSTFIT_NO_DRAFT cycle: the lane drafted nothing.
+    bool noDraft = false;
     // Why the lane's selection is unusable (invalidSelection), found before
     // any lane commits.
     std::string failure;
@@ -465,7 +487,8 @@ struct Runtime::Impl {
     std::array<uint64_t,kLaneCount> rngCounters{};
     DeferredMetalTicket::Completion finish;
     CommandTiming timing{};
-    bool representative=true,aneFailed=false;
+    bool representative = true;
+    std::shared_ptr<bool> aneFailed;
   };
   std::shared_ptr<PartialPrefill> partialPrefill;
   void discardPartial(uint64_t id) {
@@ -493,7 +516,7 @@ struct Runtime::Impl {
     }
     auto ticket=aneFfn ? aneFfn->commitPart(command,p->layerEnds[plan.prefillPart],std::move(wake)) : backend.submitCommandAsync(command,std::move(wake));
     auto finish=[this,p,events,final](CommandTiming &timing) {
-      if(aneFfn && !final && !aneFfn->finish())p->aneFailed=true;
+      if(aneFfn && !final && !aneFfn->finish())*p->aneFailed=true;
       p->timing.gpuSeconds+=timing.gpuSeconds;p->timing.wallSeconds+=timing.wallSeconds;
       if(!final) {std::vector<ModelStepResult> results;for(const auto &x:p->items)results.push_back({.requestId=x.requestId});return results;}
       const double partWall=timing.wallSeconds;timing=p->timing;partialPrefill.reset();
@@ -505,6 +528,7 @@ struct Runtime::Impl {
     return std::make_unique<DeferredMetalTicket>(std::move(ticket),std::move(finish),false);
   }
   std::unique_ptr<DecodeArena> decodeArena;
+  MetalBuffer verifyWorkspace;
   // Every state lane's penalty words, bound whole: a batch lane reads the row
   // of its request's state lane, which need not be its own.
   MetalBuffer penaltyTable;
@@ -540,6 +564,8 @@ struct Runtime::Impl {
   ModelTelemetry counters;
   ops::Sampling sampling;
   QwenTarget targetModel;
+  // Per batch width: -1 unknown, else whether the target has tree GDN verify.
+  std::array<int8_t, 5> treeVerifySupport{-1, -1, -1, -1, -1};
   DFlashDraft draftModel;
   ops::AneFfn *aneFfn;
   explicit Impl(RuntimeContext value)
@@ -561,6 +587,13 @@ struct Runtime::Impl {
     admitAllocation=std::move(value.admitAllocation);
     elasticPrefill=elasticPrefillArenaEnabled();
     if(elasticPrefill && !admitAllocation) throw std::invalid_argument("elastic prefill needs admission");
+    if (tq4WindowEnabled()) {
+      const auto &kv = geometry.target.kvLayout;
+      if (kv.format != kv::Format::TQ4 || kv.attentionLayers != JUSTFIT_TQ4_WINDOW_LAYERS ||
+          kv.kvHeads != JUSTFIT_TQ4_WINDOW_KV_HEADS || kv.headDimension != JUSTFIT_TQ4_WINDOW_HEAD_DIM)
+        throw std::invalid_argument("TQ4 BF16 window needs the 27B TQ4 KV geometry");
+      std::fprintf(stderr, "JUSTFIT_TQ4_WINDOW persistent bytes=%u\n", JUSTFIT_TQ4_WINDOW_BYTES);
+    }
     if (states.layout() != model.stateLayout() ||
         kvPages.layout() != model.targetKvLayout(kvPages.layout().format)) {
       throw std::invalid_argument(
@@ -568,6 +601,9 @@ struct Runtime::Impl {
     }
     prefillArena = std::make_unique<PrefillArena>(backend, geometry, operators);
     decodeArena = std::make_unique<DecodeArena>(backend, geometry, operators);
+    if (compactGdnEnabled())
+      verifyWorkspace = backend.allocateBuffer(compactVerifyBytes(geometry),
+                                               metal::BufferStorage::Shared, "live verify scratch");
     auto *targetFreq=contents<float>(decodeArena->get(0,DecodeTensor::TargetInverseFrequencies),"decode target frequencies");
     auto *draftFreq=contents<float>(decodeArena->get(0,DecodeTensor::DraftInverseFrequencies),"decode draft frequencies");
     for(uint32_t d=0;d<geometry.target.rotaryPairs;++d)targetFreq[d]=std::pow(geometry.target.rotaryTheta,-float(d)/geometry.target.rotaryPairs);
@@ -1140,6 +1176,16 @@ struct Runtime::Impl {
     if (first < size)
       kvPages.writeEntries(item.pageTable, first, destination);
     binding = {entry.id, item.pageTableRevision};
+    auto *entries = static_cast<JustFitKvPage *>(destination.contents());
+    entries[kMaximumPageTableEntries + 1] = tq4NormCorrection();
+    entries[kMaximumPageTableEntries] = 0;
+    if (tq4WindowEnabled()) {
+      const auto &cell=states.current(entry.stateLane).stateBase;
+      const uint64_t offset=geometry.target.stateLayout.tq4WindowOffset();
+      if (cell.sizeBytes() != offset + JUSTFIT_TQ4_WINDOW_BYTES)
+        throw std::logic_error("invalid TQ4 window state allocation");
+      entries[kMaximumPageTableEntries]=cell.gpuAddress()+offset;
+    }
     return destination;
   }
 
@@ -1277,6 +1323,32 @@ struct Runtime::Impl {
   static bool treeOverLookup() {
     const char *v = std::getenv("JUSTFIT_TREE_OVER_LOOKUP");
     return v && std::strcmp(v, "1") == 0;
+  }
+  // Measurement only: JUSTFIT_NO_DRAFT=1 decodes unconstrained lanes without
+  // the draft. A cycle encodes no draft forward, selection or context commit,
+  // no prompt lookup and no tree; it verifies the anchor in the 8-row chain
+  // graph with sentinel proposals (verify input clamps them to a valid
+  // token) and retains one token: the target's own selection at the anchor
+  // row. Greedy verification is exact, so at temperature 0 the output equals
+  // the drafted decode token for token; a sampled lane draws row 0 from the
+  // target distribution (no draft candidates, so no residual). Constrained
+  // lanes keep the draft.
+  static bool noDraft() {
+    static const bool on = [] {
+      const char *v = std::getenv("JUSTFIT_NO_DRAFT");
+      return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+  }
+  // The proposals of a JUSTFIT_NO_DRAFT lane: none, so acceptance takes no
+  // draft token and a sampled row draws from the target alone.
+  void clearDraftProposals(uint32_t lane) const {
+    std::fill_n(contents<uint32_t>(decodeArena->get(lane, DecodeTensor::ProposedTokens), "no-draft proposals"),
+                kDraftProposalTokens, UINT32_MAX);
+    std::fill_n(contents<uint32_t>(decodeArena->get(lane, DecodeTensor::Candidates), "no-draft candidates"),
+                kDraftProposalTokens * JUSTFIT_DRAFT_CANDIDATES, UINT32_MAX);
+    std::fill_n(contents<float>(decodeArena->get(lane, DecodeTensor::ProposalProbs), "no-draft probabilities"),
+                kDraftProposalTokens * JUSTFIT_DRAFT_CANDIDATES, 0.0f);
   }
 
   // Greedy tree acceptance: the accepted path in chain order into the
@@ -1703,7 +1775,8 @@ struct Runtime::Impl {
   RaggedPrefillOutputs
   encodeRaggedPrefillGraph(CommandGraph &graph,
                            std::span<const ModelBatchItem> items,
-                           std::array<Request *, kLaneCount> &entries) {
+                           std::array<Request *, kLaneCount> &entries,
+                           bool allowAne = true) {
     RaggedPrefillBatch batch = prepareRaggedPrefill(items, entries);
     auto p = [&](PrefillTensor tensor) { return prefillArena->get(tensor); };
 
@@ -1777,7 +1850,7 @@ struct Runtime::Impl {
     const MetalBuffer finalHidden = targetModel.addPrefill(
         graph, std::move(buffers),
         std::span(modelSequences).first(batch.sequences.size()), batch.rows,
-        kvPages.layers(), encodesImage ? nullptr : aneFfn);
+        kvPages.layers(), encodesImage || !allowAne ? nullptr : aneFfn);
     addRaggedDraftContext(graph, batch);
 
     // A lane that finishes its prompt copies the prompt's last row to row 0
@@ -1977,8 +2050,21 @@ struct Runtime::Impl {
     buffers.denseIntermediate = d(DecodeTensor::Intermediate);
     buffers.fullPacked = d(DecodeTensor::FullPacked);
     buffers.fullQueries = d(DecodeTensor::FullQueries);
-    buffers.attentionPartials = d(DecodeTensor::AttentionPartials);
-    buffers.attentionStatistics = d(DecodeTensor::AttentionStatistics);
+    if (compactGdnEnabled()) {
+      std::array<uint32_t, kLaneCount> history{};
+      for (uint32_t lane = 0; lane < lanes; ++lane) history[lane] = items[lane].logicalPosition;
+      const auto workspace = operators.verifyAttention(lanes, geometry.target.attentionQueryHeads,
+          geometry.target.kvLayout, std::span(history).first(lanes)).workspace;
+      const uint64_t bytes = checkedAdd(workspace.partialsBytes, workspace.statisticsBytes,
+                                        "live verify scratch");
+      if (verifyWorkspace.sizeBytes() < bytes)
+        throw std::logic_error("verify scratch exceeds admitted capacity");
+      buffers.attentionPartials = backend.view(verifyWorkspace, 0, workspace.partialsBytes);
+      buffers.attentionStatistics = backend.view(verifyWorkspace, workspace.partialsBytes, workspace.statisticsBytes);
+    } else {
+      buffers.attentionPartials = d(DecodeTensor::AttentionPartials);
+      buffers.attentionStatistics = d(DecodeTensor::AttentionStatistics);
+    }
     buffers.fullAttention = d(DecodeTensor::FullAttention);
     buffers.attentionHidden = d(DecodeTensor::AttentionHidden);
     buffers.attentionOutput = d(DecodeTensor::AttentionOutput);
@@ -2030,7 +2116,8 @@ struct Runtime::Impl {
   }
 
   void encodeTargetVerifyBatchPolicy(CommandGraph &graph,
-                                     std::span<Request *const> entries, bool tree = false) {
+                                     std::span<Request *const> entries, bool tree = false,
+                                     const JustFitTreeBatch *treeBatch = nullptr) {
     if (entries.empty() || entries.size() > kLaneCount)
       throw std::invalid_argument("invalid target policy batch");
     const uint32_t lanes = static_cast<uint32_t>(entries.size());
@@ -2045,7 +2132,7 @@ struct Runtime::Impl {
     sampling.addVerify(graph, std::span(policies).first(lanes),
                        samplingBuffers(lanes), geometry.target.stopTokens[0],
                        geometry.target.stopTokens[1],
-                       {penaltyTable, std::span(stateLanes).first(lanes)}, tree);
+                       {penaltyTable, std::span(stateLanes).first(lanes)}, tree, treeBatch);
   }
 
   void encodeDraftStateCommitBatch(CommandGraph &graph,
@@ -2156,7 +2243,9 @@ struct Runtime::Impl {
          decodeArena->gdnStorage(DecodeTensor::VerifyDecayBase),
          decodeArena->gdnStorage(DecodeTensor::VerifyBetaBase), currentStates,
          nextStates,
-         decodeArena->batchSlice(DecodeTensor::RetainedCount, width)},
+         decodeArena->batchSlice(DecodeTensor::RetainedCount, width),
+         compactGdnEnabled() && tree && ops::activeVerifyRows() == 8
+             ? decodeArena->batchSlice(DecodeTensor::VerifyCandidates, width) : MetalBuffer{}},
         width, tree);
   }
 
@@ -2242,7 +2331,7 @@ struct Runtime::Impl {
                          std::move(output),
                          false,
                          DecodeStage::Regular,
-                         ops::activeVerifyRows()-1,
+                         laneResult.noDraft ? 0u : ops::activeVerifyRows()-1,
                          std::min(laneResult.accepted, laneResult.retained - 1)});
       ModelStepResult &result = results.back();
       if (entry.generatedTokens < entry.maxNewTokens)
@@ -2526,7 +2615,7 @@ struct Runtime::Impl {
       impl_.encodeBatchEmbedding(graph,DecodeTensor::InputTokens,DecodeTensor::Hidden0,width);
       const std::span<Request*const> requests(entries.data(),width);
       impl_.encodeTargetVerifyBatchForward(graph,requests,items_,&tree);
-      impl_.encodeTargetVerifyBatchPolicy(graph,requests,samplingMask!=0);
+      impl_.encodeTargetVerifyBatchPolicy(graph,requests,samplingMask!=0,&tree);
       impl_.encodeTreeAcceptance(graph,width,{limits.data(),width},tree,samplingMask,chainRows,chainQ);
       impl_.encodeTreeGathers(graph,width);
       impl_.encodeBatchGdnCommit(graph,requests,true);
@@ -3058,7 +3147,28 @@ Runtime::prefillAsync(const BatchPlan &plan,
       impl_->aneFfn->restore();
     impl_->aneFfn->begin();
   }
-  const auto outputs = impl_->encodeRaggedPrefillGraph(graph, items, entries);
+  // Only ANE-offloaded chunks can be retried on the same live lane. Keep
+  // their nonzero starting GDN state until completion: prefill now writes
+  // current in place. Initial chunks need no copy because the retry clears
+  // them. If rollback memory cannot be admitted, encode this chunk on GPU.
+  uint32_t totalRows = 0;
+  for (const auto &item : items) totalRows += item.tokenCount;
+  bool useAne = impl_->aneFfn && impl_->aneFfn->splits(totalRows);
+  std::array<std::shared_ptr<const QwenGdnCell>, kLaneCount> rollback{};
+  if (useAne) {
+    for (uint32_t lane = 0; lane < items.size(); ++lane) {
+      if (!items[lane].logicalPosition) continue;
+      rollback[lane] = impl_->states.checkpointGdn(
+          impl_->request(items[lane].requestId).stateLane);
+      if (!rollback[lane]) {
+        useAne = false;
+        rollback.fill({});
+        break;
+      }
+    }
+  }
+  auto aneFailed = std::make_shared<bool>(false);
+  const auto outputs = impl_->encodeRaggedPrefillGraph(graph, items, entries, useAne);
   const bool encodesImages = std::any_of(
       entries.begin(), entries.begin() + items.size(), [](const auto *entry) {
         return std::any_of(entry->images.begin(), entry->images.end(),
@@ -3069,31 +3179,31 @@ Runtime::prefillAsync(const BatchPlan &plan,
   std::vector<ModelBatchItem> copiedItems(items.begin(), items.end());
 
   Impl *impl = impl_.get();
-  auto finish = [impl, entries, outputs, draws,
+  auto finish = [impl, entries, outputs, draws, rollback = std::move(rollback), aneFailed,
                  items = std::move(copiedItems)](CommandTiming &timing) mutable {
-    // A chunk whose Neural Engine work failed holds no usable outputs, and
-    // the split has stopped: the GPU runs the chunk again alone, which
-    // computes what it would have the first time. Nothing of the chunk is
-    // committed before the code below: state parity, lengths, the selected
-    // token and the image rows' state. The rerun writes the same KV and draft
-    // rows; clearForColdStart clears the current state again, which neither
-    // command writes; synchronizedPageTable writes nothing at the same
-    // revision; image rows the first command encoded are still `encoding` and
-    // are copied, not encoded again; and the requests' draws restored, a
-    // sampled first token draws the same uniform. The first ticket was
-    // released before this completion runs (DeferredMetalTicket::wait), so
-    // the backend takes the rerun's command, whose time counts in the
-    // chunk's.
-    if (impl->aneFfn && !impl->aneFfn->finish()) {
-      for (uint32_t lane = 0; lane < items.size(); ++lane)
+    // A failed ANE slice poisons the entire chunk, even when a later slice
+    // observes a retired worker and finish() itself returns true. Restore
+    // the pre-chunk GDN state before replaying the same KV/draft rows on GPU.
+    // Metadata and RNG are committed only after this succeeds. The backend
+    // has retired the first ticket before this callback reads the buffers.
+    if (impl->aneFfn && !impl->aneFfn->finish()) *aneFailed = true;
+    if (*aneFailed) {
+      for (uint32_t lane = 0; lane < items.size(); ++lane) {
         entries[lane]->rngCounter = draws[lane];
+        if (rollback[lane])
+          impl->states.restoreGdn(entries[lane]->stateLane, *rollback[lane]);
+        else if (items[lane].logicalPosition)
+          throw std::logic_error("nonzero prefill retry has no rollback state");
+      }
       CommandGraph again;
-      static_cast<void>(impl->encodeRaggedPrefillGraph(again, items, entries));
+      static_cast<void>(impl->encodeRaggedPrefillGraph(again, items, entries, false));
       const CommandTiming rerun = impl->backend.submitCommandAsync(again.command()).wait();
       timing.gpuSeconds += rerun.gpuSeconds;
       timing.wallSeconds += rerun.wallSeconds;
       ++impl->counters.aneFfnReruns;
     }
+    // This is prefill-only rollback, never a persistent second decode cell.
+    rollback.fill({});
     // A row that is not finite, of the chunk or of the state it computed
     // from, reaches the lane's last row through the recurrent state, and
     // through attention on a GPU whose tile weighs non-finite keys and values
@@ -3234,7 +3344,7 @@ Runtime::prefillAsync(const BatchPlan &plan,
     return results;
   };
   if(plan.prefillParts>1) {
-    auto p=std::make_shared<Impl::PartialPrefill>();p->graph=fullGraph;p->items.assign(items.begin(),items.end());p->rngCounters=draws;p->finish=std::move(finish);p->representative=!encodesImages;p->cuts.push_back(0);
+    auto p=std::make_shared<Impl::PartialPrefill>();p->graph=fullGraph;p->items.assign(items.begin(),items.end());p->rngCounters=draws;p->finish=std::move(finish);p->representative=!encodesImages;p->aneFailed=aneFailed;p->cuts.push_back(0);
     const auto &ends=graph.layerEnds();
     for(uint32_t part=1;part<plan.prefillParts;++part) {
       uint32_t layer=static_cast<uint32_t>(ends.size()*part/plan.prefillParts);
@@ -3283,8 +3393,48 @@ Runtime::decodeAsync(const BatchPlan &plan,
     throw std::invalid_argument("decode plan must flag any constrained lane");
   ops::VerifyShapeScope draftShape(8);
   const uint32_t width = static_cast<uint32_t>(items.size());
+  if (compactGdnEnabled()) {
+    uint32_t maxSplits = 0;
+    for (const auto &item : items)
+      maxSplits = std::max(maxSplits, kv::verifyAttentionSplits(item.logicalPosition));
+    // The draft can widen the verify shape. Reserve its maximum before the
+    // draft mutates state, and keep the current buffer until a new one exists.
+    const uint32_t maxRows = width <= 2 ? 16 : 8;
+    const uint64_t elements = uint64_t{width} * maxRows * maxSplits *
+                              impl_->geometry.target.attentionQueryHeads;
+    const uint64_t bytes = elements * (impl_->geometry.target.attentionHeadDimension + 2) * sizeof(float);
+    if (bytes > impl_->verifyWorkspace.sizeBytes()) {
+      auto allocate = [&] {
+        impl_->verifyWorkspace = impl_->backend.allocateBuffer(bytes, metal::BufferStorage::Shared,
+                                                              "live verify scratch");
+      };
+      metal::AllocationResult admission;
+      try {
+        if (impl_->admitAllocation) admission = impl_->admitAllocation(bytes, allocate);
+        else allocate();
+      } catch (const metal::MetalAllocationError &error) {
+        admission = error.failure();
+      }
+      if (!admission) {
+        std::vector<ModelStepResult> rejected;
+        for (const auto &item : items) {
+          impl_->request(item.requestId).resultInvalid = true;
+          rejected.push_back({.requestId = item.requestId,
+              .failure = std::string("verify workspace unavailable: ") +
+                         metal::allocationFailureName(admission.failure)});
+        }
+        return std::make_unique<RejectedDecodeTicket>(std::move(rejected));
+      }
+    }
+  }
+  // JUSTFIT_NO_DRAFT: no lookup, hence no tree; the 8-row chain graph.
+  const bool noDraft = !constrained && Impl::noDraft();
+  if (noDraft) {
+    static const bool announced = [] { std::fprintf(stderr, "JUSTFIT_NO_DRAFT active\n"); return true; }();
+    static_cast<void>(announced);
+  }
   const char *lookupOption=std::getenv("JUSTFIT_LOOKUP");
-  const bool lookup=lookupOption && std::strcmp(lookupOption,"1")==0 && !constrained && width<=2 && impl_->geometry.target.ffnKind == QwenFfnKind::Dense && impl_->geometry.target.kvLayout.format == kv::Format::TQ4;
+  const bool lookup=!noDraft && lookupOption && std::strcmp(lookupOption,"1")==0 && !constrained && width<=2 && impl_->geometry.target.ffnKind == QwenFfnKind::Dense && impl_->geometry.target.kvLayout.format == kv::Format::TQ4;
   bool anyWide=false;
   uint32_t wideLanes=0;
   for(const auto &item:items) {
@@ -3295,16 +3445,21 @@ Runtime::decodeAsync(const BatchPlan &plan,
   }
   // Experiment: JUSTFIT_EXP_FORCE16=1 takes the existing 16-row verify on every eligible cycle.
   uint32_t rows=lookupBatchRows(width,lookup,anyWide||(std::getenv("JUSTFIT_EXP_FORCE16")!=nullptr));
-  // Experiment: JUSTFIT_TREE=1 verifies greedy, unpenalized lanes' draft trees
+  // Experiment: JUSTFIT_TREE=1 verifies greedy (penalized too) lanes' draft trees
   // of JUSTFIT_TREE_ROWS (8 or 16) rows on the TQ4 rotated coalesced verify.
   const bool treeShape=width<=2 && impl_->geometry.target.ffnKind == QwenFfnKind::Dense &&
                        impl_->geometry.target.kvLayout.format == kv::Format::TQ4;
   bool tree=(lookup || (constrained && Impl::treeConstrained() && treeShape)) && Impl::treeEnabled();
+  // GGUF targets (fp32 mixer norms, Table16 inputs) have no tree GDN verify: chain.
+  if(tree) {
+    auto &known=impl_->treeVerifySupport[width];
+    if(known<0) known=impl_->targetModel.treeVerifySupported(width) ? 1 : 0;
+    tree=known==1;
+  }
   for(const auto &item:items) {
     const ops::SamplingPolicy policy=Impl::samplingPolicy(impl_->request(item.requestId));
     // JUSTFIT_TREE_SAMPLED=1: sampled lanes verify 16-row trees around the
     // draft's sampled chain (verify_tree_accept).
-    if(policy.penalties.active()) tree=false;
     if(policy.samples() && !(Impl::treeSampled() && Impl::treeRows()==16 && !policy.constrained)) tree=false;
     if(policy.constrained && !Impl::treeConstrained()) tree=false;
   }
@@ -3354,6 +3509,11 @@ Runtime::decodeAsync(const BatchPlan &plan,
     laneResult.maximumRetained = entry.thinkingBudget.maximumRetained(
         entry.generatedTokens, remaining, rows);
     if(item.decodeRetainLimit) laneResult.maximumRetained=std::min(laneResult.maximumRetained,item.decodeRetainLimit);
+    if (noDraft) {
+      laneResult.noDraft = true;
+      laneResult.maximumRetained = 1;
+      impl_->clearDraftProposals(lane);
+    }
 
     impl_->prepareDecodeLane(entry, item, lane);
     requests[lane] = &entry;
@@ -3372,16 +3532,19 @@ Runtime::decodeAsync(const BatchPlan &plan,
       impl_->decodeArena->batchSlice(DecodeTensor::RopeSin, width),
       impl_->decodeArena->batchSlice(DecodeTensor::DraftRopeCos, width),
       impl_->decodeArena->batchSlice(DecodeTensor::DraftRopeSin, width));
-  impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::DraftInputTokens,
-                              DecodeTensor::DraftHidden0, width);
-  impl_->draftModel.addMaskRows(commandGraph, impl_->decodeArena->batchSlice(DecodeTensor::DraftHidden0, width), width);
-  impl_->encodeDraftBatchGraph(commandGraph, entries,
-                               {logicalPositions.data(), width});
+  if (!noDraft) {
+    impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::DraftInputTokens,
+                                DecodeTensor::DraftHidden0, width);
+    impl_->draftModel.addMaskRows(commandGraph, impl_->decodeArena->batchSlice(DecodeTensor::DraftHidden0, width), width);
+    impl_->encodeDraftBatchGraph(commandGraph, entries,
+                                 {logicalPositions.data(), width});
+  }
   if (constrained) {
     return std::make_unique<Impl::ConstrainedDecodeTicket>(
         *impl_, std::move(lanes), items, commandGraph, std::move(completion));
   }
-  if (lookup || impl_->targetModel.hostEmbedding()) return std::make_unique<Impl::LookupDecodeTicket>(
+  // Without a draft the host verify input needs no draft round trip.
+  if (lookup || (impl_->targetModel.hostEmbedding() && !noDraft)) return std::make_unique<Impl::LookupDecodeTicket>(
       *impl_,std::move(lanes),items,commandGraph,std::move(completion));
   impl_->encodeBatchVerifyInput(commandGraph, width);
   impl_->encodeBatchEmbedding(commandGraph, DecodeTensor::InputTokens,
@@ -3391,7 +3554,10 @@ Runtime::decodeAsync(const BatchPlan &plan,
   impl_->encodeBatchAcceptance(commandGraph, entries,
                                {maximumRetained.data(), width});
   impl_->encodeBatchGdnCommit(commandGraph, entries);
-  impl_->encodeDraftStateCommitBatch(commandGraph, entries, items);
+  // A JUSTFIT_NO_DRAFT process never drafts again, so the draft rings need
+  // not follow; finalizeDecode still advances the lengths as if they did.
+  if (!noDraft)
+    impl_->encodeDraftStateCommitBatch(commandGraph, entries, items);
 
   std::vector<ModelBatchItem> copiedItems(items.begin(), items.end());
   Impl *impl = impl_.get();
@@ -3799,7 +3965,8 @@ WarmupStepResult Runtime::warmupCompositeStateRestore() {
 
 ModelMemoryActual Runtime::actualRuntimeMemory() const {
   return {impl_->states.actualAllocatedBytes(), impl_->prefillArena ? impl_->prefillArena->bytes() : 0,
-          impl_->decodeArena->bytes(), impl_->states.stagingBytes()};
+          impl_->decodeArena->bytes() + impl_->verifyWorkspace.allocatedBytes(),
+          impl_->states.stagingBytes()};
 }
 
 ModelTelemetry Runtime::telemetry() const noexcept {
@@ -3807,6 +3974,7 @@ ModelTelemetry Runtime::telemetry() const noexcept {
   result.stateAllocatedBytes = impl_->states.actualAllocatedBytes();
   result.idleGdnCells = impl_->states.idleCells();
   result.idleDraftRings = impl_->states.idleRings();
+  result.idleConvolutionScratchBytes = impl_->states.idleScratchBytes();
   result.visionArenaBytes = impl_->vision ? impl_->vision->arenaBytes() : 0;
   result.visionWeightResidentBytes = impl_->model.descriptor.hasVision() &&
       impl_->model.images->componentResident(kVisionWeightComponent)
@@ -3841,9 +4009,12 @@ ModelMemoryPlan plannedRuntimeMemory(const LoadedModel &model,
                                      kv::Format format) {
   requireCompatibleModel(model);
   const RuntimeGeometry geometry = RuntimeGeometry::from(model, format);
-  return {model.stateLayout().laneBytes(),
-          plannedPrefillBytes(geometry, operators),
-          plannedDecodeBytes(geometry, operators)};
+  uint64_t decodeBytes = plannedDecodeBytes(geometry, operators);
+  if (compactGdnEnabled()) {
+    decodeBytes += compactVerifyBytes(geometry);
+    decodeBytes += (3ull + 8ull) * 1024 * 1024 + 2048;
+  }
+  return {model.stateLayout().laneBytes(), plannedPrefillBytes(geometry, operators), decodeBytes};
 }
 
 std::unique_ptr<RuntimeModel> createRuntime(RuntimeContext context) {

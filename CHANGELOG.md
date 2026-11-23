@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.7.0
+
+- 16 GB Macs: `--node m6-16` serves Bonsai 2 (`prism-ml/Ternary-Bonsai-2-27B-gguf`,
+  PTQ1_0) from the Hub in a 12.1 GiB budget with up to 221,169 tokens of context.
+- GDN state compression based on LeapQuant (INT8 + rank-4 recurrent state),
+  with draft-tree verification kept fast: lower peak memory on M5 Pro and M6.
+- TQ4 KV cache: the first and the most recent pages stay in BF16 and the
+  remaining keys and values store norm-corrected codes, for attention closer
+  to BF16.
+- Draft trees now also serve requests with repetition, presence or frequency
+  penalties and JSON-schema constrained output.
+- M4 Pro: the text prefill FFN split on the Neural Engine is back on (it was
+  left off in 2.6.0), shortening time to first token on long prompts.
+- First download: large files download as 16 MiB ranges over eight parallel
+  connections, each resumable (the Hub slows each connection after its first
+  ~64 MB); an interrupted
+  download no longer surfaces as a missing `config.json`; network errors are
+  reported by category and retried for about five minutes.
+- ANE vision: on macOS builds without precompiled programs, images run on the
+  GPU; `--ane-compile` opts in to compiling them on this Mac.
+- Ollama API, `:instant` model names, hosted-tool handling in `/v1/responses`
+  and `justfit launch`.
+
 ## 2.6.0
 
 - Native distribution: `justfit` is a native executable (Rust, C++/Metal,

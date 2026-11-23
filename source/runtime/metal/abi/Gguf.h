@@ -94,11 +94,12 @@ struct GgufEmbedParams {
 static_assert(sizeof(GgufEmbedParams) == 12, "GGUF embedding parameters are 12 bytes on both sides");
 // The formats whose native token rows the embedding kernels gather
 // (kernels/shared/embedding.metal, gguf_embed_<kQuantFormats name>): every
-// format llama-quantize gives a token table by default, and Prism's PQ2_0.
+// format llama-quantize gives a token table by default, and Prism's PQ2_0 and PTQ1_0.
 inline constexpr bool gguf_embedding_format(uint32_t format) {
   return format == GGUF_FMT_Q4K || format == GGUF_FMT_Q5K || format == GGUF_FMT_Q6K || format == GGUF_FMT_Q3K ||
          format == GGUF_FMT_Q2K || format == GGUF_FMT_Q80 || format == GGUF_FMT_Q40 || format == GGUF_FMT_Q41 ||
-         format == GGUF_FMT_IQ4XS || format == GGUF_FMT_IQ4NL || format == GGUF_FMT_IQ3S || format == GGUF_FMT_PQ20;
+         format == GGUF_FMT_IQ4XS || format == GGUF_FMT_IQ4NL || format == GGUF_FMT_IQ3S || format == GGUF_FMT_PQ20 ||
+         format == GGUF_FMT_PTQ10;
 }
 
 // Prism ML's input rotation (kernels/shared/gguf_rotation.metal): weights
@@ -112,6 +113,29 @@ struct GgufRotationParams {
   uint32_t width; // a multiple of GGUF_ROTATION_BLOCK
 };
 static_assert(sizeof(GgufRotationParams) == 4, "GGUF rotation parameters are 4 bytes on both sides");
+
+// Int8-activation decode of rotated PQ2_0 and PTQ1_0 projections (ops::LinearConfig::decodeInt8):
+// gguf_rotate_int8 (kernels/shared/gguf_rotation.metal) writes the rotated input as int8 rows [rows][width], each
+// group of 32 inputs in the tile's stage order (gguf_decode_int8_position), then fp32 scales [rows][width /
+// GGUF_ROTATION_BLOCK]: input k of row r is int8 * scale[r][k / GGUF_ROTATION_BLOCK]. The tiles
+// (kernels/shared/gguf_linear.metal gguf_decode_int8_*) multiply them with the 2-bit codes in int8, taking the
+// staged decode kernels' parameters (GgufDecodeParams, GgufDecodeFusedParams), each K partition of whole 128-input
+// blocks. From Splash 1.6.1 (engine 767c646).
+struct GgufRotationInt8Params {
+  uint32_t width; // K, the row stride of the input and of the int8 rows
+  uint32_t rows;  // rows of int8 storage (the tile's height): the scales start at byte rows * K
+};
+static_assert(sizeof(GgufRotationInt8Params) == 8, "GGUF int8 rotation parameters are 8 bytes on both sides");
+// The bytes of `rows` rows of int8 storage of `width` inputs: the int8 rows, then their scales.
+inline constexpr uint64_t gguf_rotation_int8_bytes(uint32_t width, uint64_t rows) {
+  return uint64_t(width) * rows + uint64_t(width / GGUF_ROTATION_BLOCK) * rows * 4u;
+}
+// The stage position, within its group of 32, of input t of the group: the int8 tiles stage the codes of PQ2_0's
+// plane0 word w (chunks 2w, 2w + 1; PTQ1_0's packed to it) as four words (w >> 2e) & 0x03030303 (e = 0..3), so byte
+// 16 w + 4 e + k holds code e of byte k of the word, which is input 16 (k & 1) + 4 (2 w + (k >> 1)) + e.
+inline constexpr uint32_t gguf_decode_int8_position(uint32_t t) {
+  return 16u * (((t & 15u) >> 2) >> 1) + 4u * (t & 3u) + ((t >> 4) | ((((t & 15u) >> 2) & 1u) << 1));
+}
 
 // fp32 projection of a GGUF float tensor (kernels/shared/gguf_float.metal):
 // out[r][out_offset + n] = sum_k x[r][k] * W[n][k] for rows r < rows, W the

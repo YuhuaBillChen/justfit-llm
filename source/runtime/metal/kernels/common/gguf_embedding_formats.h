@@ -112,6 +112,22 @@ struct GgufEmbedPQ20 {
     return bfloat(decode(block, dim));
   }
 };
+// block_ptq1_0: uchar qs[24] | uchar qh[2] | half d, trits in PrismML-Eng/llama.cpp's order (MIT); decode as GgufEmbedPQ20.
+struct GgufEmbedPTQ10 {
+  enum : uint { Weights = 128, Bytes = 28, D = 26 };
+  __attribute__((always_inline)) static float decode(device const uchar *block, uint dim) {
+#pragma clang fp reassociate(off)
+    const uint l = dim % Weights;
+    const uint byte = l < 80 ? block[l % 16] : l < 120 ? block[16 + (l - 80) % 8] : block[24 + (l - 120) % 2];
+    const uint n = l < 80 ? l / 16 : l < 120 ? (l - 80) / 8 : (l - 120) / 2;
+    const uint p = n == 0 ? 1u : n == 1 ? 3u : n == 2 ? 9u : n == 3 ? 27u : 81u;
+    const int q = int((((byte * p) & 0xFF) * 3) >> 8);
+    return float(q - 1) * float(gguf_half(block, D));
+  }
+  __attribute__((always_inline)) static bfloat value(device const uchar *block, uint dim) {
+    return bfloat(decode(block, dim));
+  }
+};
 // block_iq4_nl: block_q4_0's layout, whose codes index the IQ4_NL values.
 struct GgufEmbedIQ4NL {
   enum : uint { Weights = 32, Bytes = 18, D = 0, Codes = 2 };

@@ -32,6 +32,15 @@ static inline void gguf_copy_native(device const uchar *blk, uint j, constant Qu
   for (uint i = 0; i < f.plane1_bytes; ++i) out1[i] = blk[at1 + f.plane1_bytes * j + i];
   if (j == 0) for (uint i = 0; i < f.meta_bytes; ++i) meta[i] = blk[atMeta + i];
 }
+// Code (trit + 1) of element e of a block_ptq1_0, as dequantize_row_ptq1_0 orders and decodes it (PrismML-Eng/llama.cpp,
+// MIT): elements 16n + m of qs[m] (m < 16), 80 + 8n + m of qs[16 + m], 120 + 2n + h of qh[h], trit n of a byte the
+// top two bits of 3 * (byte * 3^n mod 256) / 256.
+static inline uchar gguf_ptq10_code(device const uchar *blk, uint e) {
+  const uint byte = e < 80 ? blk[e % 16] : e < 120 ? blk[16 + (e - 80) % 8] : blk[24 + (e - 120) % 2];
+  const uint n = e < 80 ? e / 16 : e < 120 ? (e - 80) / 8 : (e - 120) / 2;
+  const uint pow3[5] = {1, 3, 9, 27, 81};
+  return uchar((((byte * pow3[n]) & 0xFF) * 3) >> 8);
+}
 kernel void gguf_repack(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]],
                       constant GgufRepackParams &p [[buffer(2)]], uint t [[thread_position_in_grid]]) {
   const uint G = p.input_size / 32;
@@ -105,6 +114,23 @@ kernel void gguf_repack(device const uchar *src [[buffer(0)]], device uchar *dst
       for (uint e = 0; e < 32; ++e) lo[quant_slot(e)] = (blk[2 + 8 * j + e / 4] >> (2 * (e % 4))) & 3;
       gguf_store_bits(lo, 2, out0);
       if (j == 0) { meta[0] = blk[0]; meta[1] = blk[1]; }
+      break;
+    }
+    case GGUF_FMT_PTQ10: {   // block_ptq1_0 {qs[24], qh[2], d} -> FmtPTQ10 (metal/kernels/common/quant_formats.h)
+      for (uint e = 0; e < 32; ++e) lo[quant_slot(e)] = gguf_ptq10_code(blk, 32 * j + e);
+      const auto base3 = [](uint a, uint b, uint c, uint d, uint e) { return uchar(a + 3u * (b + 3u * (c + 3u * (d + 3u * e)))); };
+      for (uint c = 0; c < 4; ++c) out0[c] = base3(lo[8 * c], lo[8 * c + 1], lo[8 * c + 2], lo[8 * c + 3], lo[8 * c + 4]);
+      for (uint k = 0; k < 2; ++k) out1[k] = base3(lo[16 * k + 5], lo[16 * k + 6], lo[16 * k + 13], lo[16 * k + 14], lo[16 * k + 7]);
+      if (j == 0) {
+        uint extra = 0;
+        for (uint jj = 0; jj < 4; ++jj)
+          for (uint e = 0; e < 32; ++e) {
+            const uint slot = quant_slot(e);
+            if (slot == 15) extra |= uint(gguf_ptq10_code(blk, 32 * jj + e)) << (4 * jj);
+            if (slot == 31) extra |= uint(gguf_ptq10_code(blk, 32 * jj + e)) << (4 * jj + 2);
+          }
+        meta[0] = blk[26]; meta[1] = blk[27]; meta[2] = uchar(extra); meta[3] = uchar(extra >> 8);
+      }
       break;
     }
     case GGUF_FMT_IQ4NL: case GGUF_FMT_Q40: case GGUF_FMT_Q41: case GGUF_FMT_MXFP4: {   // the meta unit, then qs[16]

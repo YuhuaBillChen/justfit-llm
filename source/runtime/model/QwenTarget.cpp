@@ -402,6 +402,19 @@ void QwenTarget::addVerify(
 }
 
 // Each producer emits the table (if any) its consumer's plan reads.
+bool QwenTarget::treeVerifySupported(uint32_t lanes) const {
+  bool supported = true;
+  std::visit([&](const auto *weights) {
+    for (const auto &layer : weights->layers)
+      if (const auto *mixer = std::get_if<QwenGdnWeights>(&layer.mixer)) {
+        const ops::LinearPlan plan =
+            operators_.linear().decodePlan(mixer->outputProjection, lanes, ops::LinearEpilogue::Residual);
+        supported = supported && ops::GDN::hasDecodeTree(geometry_.gdnShape(), plan.input(), mixer->mixerNorm.float32);
+      }
+  }, weights_);
+  return supported;
+}
+
 metal::MetalBuffer QwenTarget::addVerifyMixer(VerifyStep &step, const QwenGdnWeights &mixer,
                                               const ops::NormWeights &norm, metal::MetalBuffer input) const {
   const QwenTargetVerifyBuffers &b = step.buffers;
@@ -561,7 +574,7 @@ void QwenTarget::addStateCommit(metal::CommandGraph &graph,
       graph,
       {std::move(buffers.packed), std::move(buffers.mixed),
        std::move(buffers.decay), std::move(buffers.beta), buffers.currentStates,
-       buffers.nextStates, std::move(buffers.retainedCounts)},
+       buffers.nextStates, std::move(buffers.retainedCounts), std::move(buffers.acceptedPath)},
       geometry_.gdnShape(), geometry_.stateLayout.layers, lanes,
       {geometry_.stateLayout.convolutionLayerBytes(),
        geometry_.stateLayout.recurrentLayerBytes(),

@@ -202,6 +202,8 @@ pub fn convert(body: &Value) -> Result<Value> {
     };
     let mut chat = json!({"messages":normalize_input(&body["instructions"],&items)?,"parallel_tool_calls":body["parallel_tool_calls"]});
     let mut namespaces = json!({});
+    let tool_policy = crate::hosted_tools::policy();
+    let mut ignored_tools = Vec::new();
     if !body["tools"].is_null() {
         let tools = body["tools"]
             .as_array()
@@ -223,11 +225,16 @@ pub fn convert(body: &Value) -> Result<Value> {
                     namespaces[&alias] = json!([tool["name"], child["name"]]);
                     out.push(function(child, Some(alias)));
                 }
-            } else {
-                if tool["type"] != "function" {
-                    return Err(bad("only function tools are supported"));
-                }
+            } else if tool["type"] == "function" {
                 out.push(function(tool, None));
+            } else {
+                let kind = tool["type"].as_str().unwrap_or("(missing)");
+                crate::hosted_tools::handle(
+                    kind,
+                    crate::hosted_tools::openai_hosted(kind),
+                    tool_policy,
+                    &mut ignored_tools,
+                )?;
             }
         }
         chat["tools"] = if out.is_empty() {

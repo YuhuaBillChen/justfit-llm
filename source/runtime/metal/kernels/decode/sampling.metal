@@ -937,7 +937,8 @@ inline float penalize_logit(float value, uint count, float repetition,
 // Rewrites one token's logit in each penalized row of one entry, in place.
 // Bit r of drafted is set when the lane's verify input row r holds the
 // token: those are the draft tokens that verify row r's context adds to the
-// output, so row r counts bits 1..r on top of the table's count.
+// output, so row r counts the bits of its history (params.history: rows
+// 1..r of a chain, a tree row's ancestors) on top of the table's count.
 inline void penalize_token(device float *logits, device const uint *words,
                            uint token, uint entry, uint drafted,
                            constant SamplingPenaltyParams &params) {
@@ -952,7 +953,7 @@ inline void penalize_token(device float *logits, device const uint *words,
       token;
   for (uint row = 0; row < params.rows; ++row) {
     const uint count = (word & JUSTFIT_PENALTY_COUNT_MASK) +
-                       popcount(drafted & ((2u << row) - 2u));
+                       popcount(drafted & params.history[entry][row]);
     if (!count && !(word & JUSTFIT_PENALTY_PROMPT_BIT))
       continue;
     device float &logit = column[ulong(row) * params.vocabulary];

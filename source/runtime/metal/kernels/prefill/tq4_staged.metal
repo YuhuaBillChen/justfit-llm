@@ -20,8 +20,8 @@ kernel void prefill_attention_tq4_stage_head(
   if (page >= pages || params.kv_head >= JustFitTQ4KVHeads)
     return;
   const JustFitTQ4PageView layer_page = justfit_tq4_page(page_table[page], params.kv);
-  justfit_tq4_inverse_page<false>(layer_page, params.kv_head, decoded,
-                                 simd_group, simd_lane);
+  justfit_tq4_window_page<false>(page_table, params.kv, layer_page, page, pages - 1,
+                                  params.kv_head, decoded, simd_group, simd_lane);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   const uint start = page * N;
   for (uint index = thread_index; index < N * D; index += 256) {
@@ -30,8 +30,8 @@ kernel void prefill_attention_tq4_stage_head(
       staged_keys[ulong(start + token) * D + index % D] = decoded[index];
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  justfit_tq4_inverse_page<true>(layer_page, params.kv_head, decoded,
-                                simd_group, simd_lane);
+  justfit_tq4_window_page<true>(page_table, params.kv, layer_page, page, pages - 1,
+                                  params.kv_head, decoded, simd_group, simd_lane);
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint index = thread_index; index < N * D; index += 256) {
     const uint token = index / D;

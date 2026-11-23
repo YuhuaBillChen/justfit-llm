@@ -1094,7 +1094,7 @@ version = "0.0.0"
 
 [[package]]
 name = "justfit-rust-frontend"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

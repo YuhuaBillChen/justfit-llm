@@ -10,6 +10,16 @@ pub fn allowed_character(c: char) -> bool {
     ranges.get(index).is_none_or(|&(low, _)| point < low) && !matches!(c, '\\' | '%' | '?' | '#')
 }
 
+/// `<name>:instant` serves the same model with thinking off by default, for
+/// clients that can choose a model but cannot send reasoning parameters
+/// (Ollama apps, simple Open WebUI setups). An explicit reasoning_effort or
+/// enable_thinking in the request still wins.
+pub const INSTANT_SUFFIX: &str = ":instant";
+
+pub fn is_instant(name: &str) -> bool {
+    name.ends_with(INSTANT_SUFFIX)
+}
+
 pub fn names(loaded: &str, aliases: &[String], announce: bool) -> Result<(String, Vec<String>)> {
     for alias in aliases {
         if alias.is_empty() || !alias.chars().all(allowed_character)
@@ -27,8 +37,9 @@ pub fn names(loaded: &str, aliases: &[String], announce: bool) -> Result<(String
 }
 
 pub fn rows(names: &[String], response: &str, context: u32, vision: bool, modalities: &[String]) -> Vec<Value> {
-    names.iter().map(|name| {
-        let mut row = json!({"id":name,"object":"model","created":0,"owned_by":"justfit","max_model_len":context,"context_length":context,"vision":vision,"input_modalities":modalities});
+    let instant = names.iter().map(|name| format!("{name}{INSTANT_SUFFIX}"));
+    names.iter().cloned().chain(instant).map(|name| {
+        let mut row = json!({"id":name,"object":"model","created":0,"owned_by":"justfit","max_model_len":context,"context_length":context,"vision":vision,"input_modalities":modalities,"thinking":!is_instant(&name)});
         if name != response { row["root"] = json!(response); }
         row
     }).collect()
@@ -36,7 +47,10 @@ pub fn rows(names: &[String], response: &str, context: u32, vision: bool, modali
 
 impl crate::Frontend {
     pub fn accepts_model(&self, model: &Value) -> bool {
-        model.as_str().is_some_and(|model| self.model_names.iter().any(|name| name == model))
+        model.as_str().is_some_and(|model| {
+            let base = model.strip_suffix(INSTANT_SUFFIX).unwrap_or(model);
+            self.model_names.iter().any(|name| name == base)
+        })
     }
     pub fn configure_names(&mut self, aliases: &[String], announce: bool) -> Result<()> {
         (self.response_model, self.model_names) = names(&self.model, aliases, announce)?;
@@ -71,6 +85,17 @@ mod tests {
         assert!(items[0].get("root").is_none());
         assert_eq!(items[1]["root"],"friendly");
         assert!(names("owner/model",&[],true).is_err());
+    }
+    #[test]
+    fn every_name_has_an_instant_variant_listed_after_the_originals() {
+        let all = vec!["owner/model".to_string(), "friendly".to_string()];
+        let items = rows(&all, "owner/model", 4096, false, &["text".into()]);
+        let ids: Vec<_> = items.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["owner/model", "friendly", "owner/model:instant", "friendly:instant"]);
+        assert_eq!(items[0]["thinking"], true);
+        assert_eq!(items[2]["thinking"], false);
+        assert_eq!(items[2]["root"], "owner/model");
+        assert!(is_instant("friendly:instant") && !is_instant("friendly"));
     }
     #[test]
     fn url_unsafe_whitespace_and_nonprintable_names_are_rejected() {

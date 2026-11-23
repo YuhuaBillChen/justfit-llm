@@ -5,9 +5,12 @@
 
 #include "metal/abi/ExecutionGeometry.h"
 #include "metal/abi/Gguf.h"
+#include "metal/abi/Linear.h"
 #include "ops/BufferExtent.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -25,8 +28,9 @@ constexpr size_t kFusedSegments = std::extent_v<decltype(GgufDecodeFusedParams::
 // the 32-row tile over four lanes of storage.
 constexpr uint32_t stagedTileRows(uint32_t rows) noexcept { return rows <= 8 ? 8 : rows <= 16 ? 16 : 32; }
 
-std::string decodeKernel(const char *format, uint32_t rows, char epilogue) {
-  return std::string("gguf_decode_") + format + "_m" + std::to_string(rows) + "_" + epilogue;
+std::string decodeKernel(bool int8, const char *format, uint32_t rows, char epilogue) {
+  return std::string(int8 ? "gguf_decode_int8_" : "gguf_decode_") + format + "_m" + std::to_string(rows) + "_" +
+         epilogue;
 }
 std::string prefillKernel(const char *format, char epilogue) {
   return std::string("gguf_prefill_") + format + "_" + epilogue;
@@ -100,6 +104,11 @@ LinearConfig stagedDecode(uint32_t n, uint32_t k, uint32_t cores, GpuFamilyClass
 bool apple9Stages(LinearWorkload w, std::span<const Projection *const> projections) {
   const uint32_t lanes = w.rows / JUSTFIT_TARGET_VERIFY_ROWS;
   bool quantized = false;
+  // PTQ1_0 decodes in the staged tiles only (FmtPTQ10), whatever their padding costs.
+  for (const Projection *p : projections)
+    if (p)
+      for (const QuantizedSegment &s : p->blocks().segments)
+        if (!s.isFloat() && s.formatId == GGUF_FMT_PTQ10) return true;
   for (const Projection *p : projections) {
     if (!p) continue;
     for (const QuantizedSegment &s : p->blocks().segments) {
@@ -109,6 +118,42 @@ bool apple9Stages(LinearWorkload w, std::span<const Projection *const> projectio
     }
   }
   return quantized && stagedTileRows(w.rows) == w.rows;
+}
+
+// Inputs of an int8 decode tile's block: K partitions keep whole 128-input
+// blocks, so each folds its own (gguf_int8_accumulate).
+constexpr uint32_t kDecodeInt8BlockInputs = 128;
+static_assert(kQuantFormats[GGUF_FMT_PQ20].meta_groups * 32 == kDecodeInt8BlockInputs &&
+                  kQuantFormats[GGUF_FMT_PTQ10].meta_groups * 32 == kDecodeInt8BlockInputs,
+              "PQ2_0 and PTQ1_0 hold one d per 128 inputs");
+bool decodeInt8TakesSplits(uint32_t k, uint32_t splits) noexcept {
+  return k % GGUF_ROTATION_BLOCK == 0 && splits && k % (splits * kDecodeInt8BlockInputs) == 0;
+}
+
+// Whether a staged decode `config` of the projections runs int8 activations
+// (Splash 1.6.1's decode int8, ported): JUSTFIT_DECODE_INT8=1, Apple10 (the
+// caller's), 16 or 32 storage rows (an 8-row int8 matmul takes about as long
+// as a 16-row one on the neural accelerator, so one 8-row lane stays bf16),
+// K splits of whole blocks, and every quantized segment of the projections
+// (a gate/up plan's gate too) rotated and of one format the int8 tiles take
+// (quant_decode_int8_format). The rows and splits stay the bf16 plan's.
+bool decodeInt8Selected(LinearWorkload w, LinearConfig config, std::span<const Projection *const> projections) {
+  const char *value = std::getenv("JUSTFIT_DECODE_INT8");
+  if (!value || std::string_view(value) != "1") return false;
+  if (w.phase != LinearPhase::Decode || config.tile != LinearTile::GgufStaged || stagedTileRows(w.rows) < 16 ||
+      !decodeInt8TakesSplits(w.matrix.inputSize, config.splits))
+    return false;
+  uint32_t format = GGUF_FMT_COUNT;
+  for (const Projection *p : projections) {
+    if (!p) continue;
+    if (!p->rotation) return false;
+    for (const QuantizedSegment &s : p->blocks().segments) {
+      if (s.isFloat()) continue;
+      if (!quant_decode_int8_format(s.formatId) || (format != GGUF_FMT_COUNT && s.formatId != format)) return false;
+      format = s.formatId;
+    }
+  }
+  return format != GGUF_FMT_COUNT;
 }
 
 // The projection is the plan's matrix, and each of its segments (which tile
@@ -195,6 +240,8 @@ void LinearPlan::requireBlockConfiguration() const {
   const bool decode = workload_.phase == LinearPhase::Decode;
   if (c.simdgroups != LinearConfig{}.simdgroups)
     throw std::invalid_argument("the GGUF tiles fix their threadgroups and take the default simdgroups");
+  if (c.decodeInt8 && c.tile != LinearTile::GgufStaged)
+    throw std::invalid_argument("only the staged block decode tile runs int8 activations");
   if (c.tile == LinearTile::GgufRegister) {
     // Split boundaries fall on 256-input coefficient units.
     if (!decode || !c.validSplits() || k / 256 < c.splits)
@@ -207,6 +254,9 @@ void LinearPlan::requireBlockConfiguration() const {
   }
   if (!c.validSplits() || (k / 32) % c.splits)
     throw std::invalid_argument("staged block splits take whole 32-input groups");
+  if (c.decodeInt8 && (!decode || blockStorageRows() < 16 || !decodeInt8TakesSplits(k, c.splits)))
+    throw std::invalid_argument("only a staged block decode of 16 or 32 rows and whole 128-input blocks per split "
+                                "runs int8 activations");
   // Prefill chunks of up to a decode batch run the staged tile and split K as
   // in decode.
   if (!decode && workload_.rows > kMaximumDecodeTileRows)
@@ -259,7 +309,10 @@ LinearConfig Linear::ggufBaseline(LinearWorkload w, std::span<const Projection *
   // Apple9 runs matrix operations on the FP32 pipe, so the exact register
   // kernel beats staging but for the projections apple9Stages names.
   if (family_ == GpuFamilyClass::Apple9 && !apple9Stages(w, projections)) return registerDecode(n, k, gpuCores_);
-  return stagedDecode(n, k, gpuCores_, family_);
+  LinearConfig config = stagedDecode(n, k, gpuCores_, family_);
+  // Apple9's matrix operations share the FP32 pipe: int8 runs on Apple10 only.
+  config.decodeInt8 = family_ == GpuFamilyClass::Apple10 && decodeInt8Selected(w, config, projections);
+  return config;
 }
 
 LinearScratchSize Linear::ggufDecodeScratchSize(LinearWorkload w) const {
@@ -301,14 +354,34 @@ void Linear::addGguf(metal::CommandGraph &graph, const LinearBuffers &b,
     if (k % GGUF_ROTATION_BLOCK)
       throw std::invalid_argument("a rotated projection takes whole rotation blocks");
     requireBytes(p.rotation.signs, k, "rotation sign");
-    graph.add("gguf_rotate", {b.input, p.rotation.signs, b.scratch.rotated}, GgufRotationParams{k},
-              {k / GGUF_ROTATION_BLOCK, w.rows, 1}, {GGUF_ROTATION_THREADS, 1, 1});
     LinearBuffers rotated = b;
     rotated.input = b.scratch.rotated;
     rotated.prepared = {};
     Projection plain = p;
     plain.rotation = {};
+    if (plan.configuration().decodeInt8) {
+      // In int8 activations the rotation writes int8 rows and their scales
+      // for the plan's storage rows (gguf_rotate_int8), which the int8 tiles
+      // read; padding rows stay unwritten and their outputs are discarded.
+      static thread_local bool reported = false;
+      if (!reported) {
+        reported = true;
+        std::fprintf(stderr, "JUSTFIT_DECODE_INT8 rotated_int8 active\n");
+      }
+      const uint32_t rows = plan.storageRows();
+      requireBytes(b.scratch.rotated, gguf_rotation_int8_bytes(k, rows), "projection int8 rows");
+      graph.add("gguf_rotate_int8", {b.input, p.rotation.signs, b.scratch.rotated}, GgufRotationInt8Params{k, rows},
+                {k / GGUF_ROTATION_BLOCK, w.rows, 1}, {GGUF_ROTATION_THREADS, 1, 1});
+      addGgufStaged(graph, rotated, plain, plan, gate);
+      return;
+    }
+    graph.add("gguf_rotate", {b.input, p.rotation.signs, b.scratch.rotated}, GgufRotationParams{k},
+              {k / GGUF_ROTATION_BLOCK, w.rows, 1}, {GGUF_ROTATION_THREADS, 1, 1});
     addGguf(graph, rotated, plain, plan, gate);
+    return;
+  }
+  if (plan.verifyA8_) {
+    addGgufA8(graph, b, p, plan, gate);
     return;
   }
   switch (plan.configuration().tile) {
@@ -322,6 +395,49 @@ void Linear::addGguf(metal::CommandGraph &graph, const LinearBuffers &b,
   case LinearTile::Split128:
   case LinearTile::Paired256:
   case LinearTile::Q4Register: break;
+  }
+}
+
+// Prefill of Prism's ternary tensors with int8 activations (Linear::plan's
+// verifyA8_, kernels/prefill/gguf_t2a8.metal): the affine A8 quantizer, then
+// the 2-bit codes against them, in 32-row x 128-column tiles.
+void Linear::addGgufA8(metal::CommandGraph &graph, const LinearBuffers &b, const Projection &p,
+                       const LinearPlan &plan, const Projection *gate) const {
+  const LinearWorkload w = plan.workload();
+  const auto [n, k] = w.matrix;
+  static thread_local bool reported = false;
+  if (!reported) {
+    reported = true;
+    std::fprintf(stderr, "JUSTFIT_A8 phase=prefill ternary_selected active\n");
+  }
+  const LinearScratchSize scratch = plan.scratchSize();
+  requireBytes(b.scratch.a8Codes, scratch.a8Codes, "A8 codes");
+  requireBytes(b.scratch.a8Scale, scratch.a8Scale, "A8 scales");
+  requireBytes(b.scratch.a8Sums, scratch.a8Sums, "A8 sums");
+  if (n % 128 || k % 128) throw std::invalid_argument("ternary A8 takes 128-column tiles and 128-input blocks");
+  const uint32_t rows = plan.storageRows();
+  const Q4A8Params params{n, k, rows};
+  graph.add("verify_linear_q4a8_quantize", {b.input, b.scratch.a8Codes, b.scratch.a8Scale, b.scratch.a8Sums}, params,
+            {rows * (k / 64) / 8, 1, 1}, {256, 1, 1});
+  const auto dispatch = [&](const char *kind, const Projection &projection, metal::MetalBuffer auxiliary,
+                            metal::MetalBuffer output) {
+    const QuantizedSegment &s = projection.blocks().segments.front();
+    std::vector<metal::MetalBuffer> buffers{b.scratch.a8Codes, b.scratch.a8Scale, b.scratch.a8Sums,
+                                           s.plane0, s.plane1Slot(), s.meta};
+    if (auxiliary) buffers.push_back(auxiliary);
+    buffers.push_back(output);
+    graph.add(std::string("prefill_linear_t2a8") + kind + "_" + s.name(), std::move(buffers), params,
+              {n / 128, (rows + 63) / 64, 1}, {256, 1, 1});
+  };
+  if (gate) {
+    dispatch("", *gate, {}, b.gateScratch);
+    dispatch("_up_silu", p, b.gateScratch, b.output);
+  } else if (w.epilogue == LinearEpilogue::Residual) {
+    dispatch("_residual", p, b.residual, b.output);
+  } else if (w.epilogue == LinearEpilogue::UpWithGate) {
+    dispatch("_up_silu", p, b.gateScratch, b.output);
+  } else {
+    dispatch("", p, {}, b.output);
   }
 }
 
@@ -340,9 +456,17 @@ void Linear::addGgufStaged(metal::CommandGraph &graph, const LinearBuffers &b,
   const std::vector<QuantizedSegment> &segments = p.blocks().segments;
   const uint32_t rows = plan.storageRows(), splits = config.splits;
   const auto [partials, counters] = splitScratch(b, splits);
+  // In int8 activations (decode only) the same dispatches run the int8 tiles
+  // of the segments' one format over the int8 rows of b.input.
+  if (config.decodeInt8)
+    for (const Projection *q : {&p, gate})
+      if (q)
+        for (const QuantizedSegment &s : q->blocks().segments)
+          if (s.formatId != segments.front().formatId || !quant_decode_int8_format(s.formatId))
+            throw std::invalid_argument("the int8 tiles take segments of one PQ2_0 or PTQ1_0 format");
   const auto tensor = [&](const QuantizedSegment &s, char epilogue, const metal::MetalBuffer &output,
                           const metal::MetalBuffer &aux) {
-    graph.add(kernelInstance(decodeKernel(s.name(), rows, epilogue), plan.destination()),
+    graph.add(kernelInstance(decodeKernel(config.decodeInt8, s.name(), rows, epilogue), plan.destination()),
               {b.input, s.plane0, s.plane1Slot(), s.meta, output, partials, counters, aux},
               GgufDecodeParams{k, splits, n, s.columnOffset}, {s.outputSize / GGUF_TILE_COLUMNS, splits, 1},
               {GGUF_STAGED_THREADS, 1, 1});
@@ -370,8 +494,12 @@ void Linear::addGgufStaged(metal::CommandGraph &graph, const LinearBuffers &b,
   std::vector<metal::MetalBuffer> bindings{b.input};
   const GgufDecodeFusedParams params = fusedSegments(plan, order, bindings);
   bindings.insert(bindings.end(), {b.output, partials, counters});
-  graph.add("gguf_decode_fused_m" + std::to_string(rows), std::move(bindings), params,
-            {segmentColumns(p) / GGUF_TILE_COLUMNS, splits, 1}, {GGUF_STAGED_THREADS, 1, 1});
+  // The int8 tiles take segments of one format, each format a kernel of its own.
+  const std::string kernel = config.decodeInt8
+      ? std::string("gguf_decode_int8_") + segments.front().name() + "_fused_m" + std::to_string(rows)
+      : "gguf_decode_fused_m" + std::to_string(rows);
+  graph.add(kernel, std::move(bindings), params, {segmentColumns(p) / GGUF_TILE_COLUMNS, splits, 1},
+            {GGUF_STAGED_THREADS, 1, 1});
 }
 
 // The prefill tile, which runs prefill chunks of more than
@@ -499,7 +627,7 @@ void requireSegmentPlanes(const QuantizedSegment &segment, std::string_view what
 bool apple9StagesFormat(uint32_t format) noexcept {
   switch (format) {
   case GGUF_FMT_IQ3XXS: case GGUF_FMT_IQ2XXS: case GGUF_FMT_IQ2XS: case GGUF_FMT_IQ2S:
-  case GGUF_FMT_IQ1S: case GGUF_FMT_IQ1M: return true;
+  case GGUF_FMT_IQ1S: case GGUF_FMT_IQ1M: case GGUF_FMT_PTQ10: return true;
   default: return false;
   }
 }

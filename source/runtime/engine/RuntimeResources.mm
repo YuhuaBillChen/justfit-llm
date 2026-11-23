@@ -138,7 +138,8 @@ std::string calibrationKey(std::span<const ops::SwiGluProjections> layers) {
     for (const ops::Projection *projection : {layer.gate, layer.up, layer.down}) {
       const bool affine = projection->layout() == ops::WeightLayout::Affine64;
       key += " " + std::to_string(projection->outputSize) + "x" + std::to_string(projection->inputSize) + ":" +
-             (affine ? "a" : "g" + std::to_string(projection->blocks().segments.front().formatId));
+             (affine ? "a" : "g" + std::to_string(projection->blocks().segments.front().formatId)) +
+             (projection->rotation ? "r" : "");
     }
   return key;
 }
@@ -231,6 +232,11 @@ std::string persistentCacheNamespace(const RuntimeCacheIdentity &identity,
             << ' ' << gdn.recurrentColumns << '\n'
             << "draft " << draft.layers << ' ' << draft.kvHeads << ' ' << draft.headDimension << ' '
             << JUSTFIT_DRAFT_SLIDING_WINDOW << '\n';
+  if (model::compactGdnEnabled()) canonical << "gdn-codec int8-rank4-shared-bf16-v1\n";
+  if (kv.format == kv::Format::TQ4) {
+    if (model::tq4WindowEnabled()) canonical << "tq4-window bf16-ring-v1\n";
+    if (const auto correction=model::tq4NormCorrection()) canonical << "tq4-norm " << correction << '\n';
+  }
   // 128 bits name it.
   return model::weightDigest(canonical.str()).substr(0, 32);
 }
@@ -434,6 +440,11 @@ RuntimeResources::create(const RuntimeResourcesConfig &config,
         stateStagingBytes,
         aneFfnBytes,
         model::elasticPrefillArenaEnabled(),
+        [&]() -> uint64_t {
+          const char *parked = std::getenv("JUSTFIT_PARKED");
+          return parked && std::string_view(parked) == "1"
+                     ? config.model.stateLayout.cachedBytes() : 0;
+        }(),
     };
     ModelMemoryProfile modelProfile{
         loaded.name(), loaded.maximumContextTokens(),

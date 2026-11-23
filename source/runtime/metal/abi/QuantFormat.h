@@ -26,7 +26,7 @@
 //   Every other field is a little-endian bit string of the 32 slots: IQ4 and
 //     MXFP4 indices (4 bits, so byte p of word c is pair p), Q8_0 values (8),
 //     Q6_K high, Q3_K low, Q2_K and PQ2_0 bits (2), Q5_K fifth and Q3_K hmask
-//     bits (1).
+//     bits (1). PTQ1_0 stores base-3 codes (its kQuantFormats row), decoded to PQ2_0's.
 //   IQ3_S word c: bits 0..7 and 8..15 the low grid index bits of elements
 //     4c..4c+3 and 16+4c..16+4c+3, 16..23 the sign bits of slots 8c..8c+7,
 //     24 and 25 the two ninth index bits, 26..29 the group's scale.
@@ -63,7 +63,8 @@
 #define GGUF_FMT_Q41 16u
 #define GGUF_FMT_MXFP4 17u
 #define GGUF_FMT_PQ20 18u
-#define GGUF_FMT_COUNT 19u
+#define GGUF_FMT_PTQ10 19u
+#define GGUF_FMT_COUNT 20u
 
 struct QuantFormat {
   uint32_t ggml_type;      // GGUF tensor type
@@ -96,6 +97,9 @@ QUANT_CONSTANT QuantFormat kQuantFormats[GGUF_FMT_COUNT] = {
     {3, 32, 20, 16, 0, 4, 1, "q41"},      // meta: d, m
     {39, 32, 17, 16, 0, 1, 1, "mxfp4"},   // meta: e
     {142, 128, 34, 8, 0, 2, 4, "pq20"},   // Prism's block_pq2_0, one d per 128 elements; meta: d
+    {143, 128, 28, 4, 2, 4, 4, "ptq10"},  // Prism's block_ptq1_0 (trits), 1.75 bits as its own: plane0 byte c the
+                                          // codes of slots 8c..8c+4 in base 3, plane1 two base-3 bytes, meta d and
+                                          // the 4-bit fields of the four groups (FmtPTQ10)
 };
 
 // The format that stores a GGUF tensor type; GGUF_FMT_COUNT when none does.
@@ -103,6 +107,13 @@ inline constexpr uint32_t gguf_format_of(uint32_t ggml_type) {
   for (uint32_t format = 0; format < GGUF_FMT_COUNT; ++format)
     if (kQuantFormats[format].ggml_type == ggml_type) return format;
   return GGUF_FMT_COUNT;
+}
+
+// Whether the int8 decode tiles (kernels/shared/gguf_linear.metal
+// gguf_decode_int8_*) take a format: PQ2_0 and PTQ1_0, whose 2-bit codes q
+// stand for q - 1, exact in int8, with one d per 128-input block.
+inline constexpr bool quant_decode_int8_format(uint32_t format) {
+  return format == GGUF_FMT_PQ20 || format == GGUF_FMT_PTQ10;
 }
 
 // The chunk order slot of element e (0..31) of a group.

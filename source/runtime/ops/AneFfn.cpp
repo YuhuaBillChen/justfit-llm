@@ -4,6 +4,7 @@
 #include "Checked.hpp"
 #include "StderrLine.hpp"
 #include "metal/abi/AneFfn.h"
+#include "metal/abi/Gguf.h"
 #include "metal/abi/QuantFormat.h"
 #include "ops/BufferExtent.hpp"
 
@@ -70,11 +71,18 @@ constexpr auto kProgramLimit = std::chrono::seconds(120);
 // of holding the engine longer.
 constexpr auto kReloadLimit = std::chrono::seconds(10);
 
-// The GPU's channels of `intermediate` with the ANE taking `aneUnits`.
-uint32_t gpuChannels(uint32_t intermediate, uint32_t aneUnits) {
-  if (!aneUnits || aneUnits >= intermediate / kChannelUnit)
+// Prism-rotated layers (InputRotation on gate, up and down): the split moves
+// whole blocks of down's rotation, so each side rotates only its own.
+bool prismLayers(std::span<const SwiGluProjections> layers) {
+  return static_cast<bool>(layers.front().down->rotation);
+}
+uint32_t channelUnit(bool prism) { return prism ? std::max(kChannelUnit, GGUF_ROTATION_BLOCK) : kChannelUnit; }
+
+// The GPU's channels of `intermediate` with the ANE taking `aneUnits` units.
+uint32_t gpuChannels(uint32_t intermediate, uint32_t aneUnits, uint32_t unit) {
+  if (!aneUnits || aneUnits >= intermediate / unit)
     throw std::invalid_argument("ANE FFN split leaves the GPU or the ANE no channels");
-  return intermediate - aneUnits * kChannelUnit;
+  return intermediate - aneUnits * unit;
 }
 
 std::vector<uint32_t> segments(uint32_t channels) {
@@ -91,12 +99,19 @@ const char *AneFfn::unsupported(std::span<const SwiGluProjections> layers) {
   if (hidden % kSegment) return "ANE FFN split needs a hidden size of whole 2560-channel segments";
   if (hidden % kRotateGroup || hidden / kRotateGroup > ANE_FFN_ROTATE_BLOCKS)
     return "ANE FFN split needs a hidden size ane_ffn_rotate takes";
-  if (intermediate % kChannelUnit || intermediate < 2 * kChannelUnit)
+  const bool prism = prismLayers(layers);
+  const uint32_t unit = channelUnit(prism);
+  if (intermediate % unit || intermediate < 2 * unit)
     return "ANE FFN split needs two or more whole rotation blocks of intermediate channels";
+  if (prism && hidden % GGUF_ROTATION_BLOCK) return "ANE FFN split needs whole Prism rotation blocks";
   for (const SwiGluProjections &layer : layers) {
     for (const Projection *projection : {layer.gate, layer.up, layer.down})
       if (!projection->takesPlaneViews())
-        return "ANE FFN split needs affine Q4 projections or unrotated quantized GGUF tensors";
+        return "ANE FFN split needs affine Q4 projections or quantized GGUF tensors";
+    if (static_cast<bool>(layer.gate->rotation) != prism || static_cast<bool>(layer.up->rotation) != prism ||
+        static_cast<bool>(layer.down->rotation) != prism ||
+        (prism && !layer.gate->rotation.signs.sameView(layer.up->rotation.signs)))
+      return "ANE FFN split needs gate, up and down all unrotated, or gate and up under one rotation and down rotated";
     if (layer.gate->outputSize != intermediate || layer.gate->inputSize != hidden ||
         layer.up->outputSize != intermediate || layer.up->inputSize != hidden || layer.down->outputSize != hidden ||
         layer.down->inputSize != intermediate)
@@ -107,7 +122,7 @@ const char *AneFfn::unsupported(std::span<const SwiGluProjections> layers) {
 
 uint32_t AneFfn::units(std::span<const SwiGluProjections> layers) {
   if (const char *reason = unsupported(layers)) throw std::invalid_argument(reason);
-  return layers.front().gate->outputSize / kChannelUnit;
+  return layers.front().gate->outputSize / channelUnit(prismLayers(layers));
 }
 
 namespace {
@@ -144,6 +159,41 @@ std::vector<uint8_t> rotationBlob(uint32_t channels, const std::array<float, ANE
       const float hadamard = (std::popcount(output & input) & 1) ? -1.0f : 1.0f;
       values[uint64_t{channel} * block + input] = _Float16(signs[output] * hadamard * norm);
     }
+  return ane::constantBlob(values);
+}
+
+// The same constant for Prism-rotated layers: down's weights were stored for
+// P h, P = H D the normalized Sylvester Walsh-Hadamard transform of each block
+// of GGUF_ROTATION_BLOCK intermediate channels after their signs D, so each of
+// the ANE's channels, from channel `first` of the intermediate on, rotates by
+// the ANE's rotation (blocks of ANE_FFN_INTERMEDIATE_BLOCK) times P, a
+// [channels, GGUF_ROTATION_BLOCK, 1, 1] grouped 1x1 convolution. `first` and
+// `channels` take whole Prism blocks; `prism` holds D for the intermediate.
+std::vector<uint8_t> prismRotationBlob(uint32_t first, uint32_t channels,
+                                       const std::array<float, ANE_FFN_INTERMEDIATE_BLOCK> &signs,
+                                       const int8_t *prism) {
+  constexpr uint32_t block = GGUF_ROTATION_BLOCK, half = ANE_FFN_INTERMEDIATE_BLOCK;
+  static_assert(block % half == 0, "a Prism block holds whole ANE rotation blocks");
+  if (first % block || channels % block) throw std::invalid_argument("the ANE's channels take whole Prism blocks");
+  const auto sylvester = [](uint32_t a, uint32_t b) { return (std::popcount(a & b) & 1) ? -1.0 : 1.0; };
+  // A[o][i] = sum_m R[o][m] H[m][i] / sqrt(block), R the ANE's rotation of
+  // o's block of `half` channels; the signs of P multiply its inputs below.
+  std::vector<double> a(uint64_t{block} * block, 0.0);
+  const double norm = 1.0 / std::sqrt(double(half)) / std::sqrt(double(block));
+  for (uint32_t o = 0; o < block; ++o) {
+    const uint32_t base = o / half * half, r = o % half;
+    for (uint32_t m = 0; m < half; ++m) {
+      const double weight = signs[r] * sylvester(r, m) * norm;
+      double *row = &a[uint64_t{o} * block];
+      for (uint32_t i = 0; i < block; ++i) row[i] += weight * sylvester(base + m, i);
+    }
+  }
+  std::vector<_Float16> values(uint64_t{channels} * block);
+  for (uint32_t channel = 0; channel < channels; ++channel) {
+    const uint32_t o = channel % block, start = first + channel / block * block;
+    for (uint32_t i = 0; i < block; ++i)
+      values[uint64_t{channel} * block + i] = _Float16(a[uint64_t{o} * block + i] * prism[start + i]);
+  }
   return ane::constantBlob(values);
 }
 
@@ -224,7 +274,9 @@ AneFfn::Shape AneFfn::shapeOf(std::span<const SwiGluProjections> layers, uint32_
   shape.hidden = layers.front().gate->inputSize;
   shape.intermediate = layers.front().gate->outputSize;
   shape.layers = static_cast<uint32_t>(layers.size());
-  shape.gpu = gpuChannels(shape.intermediate, aneUnits);
+  shape.prism = prismLayers(layers);
+  if (shape.prism) shape.rotationBlock = GGUF_ROTATION_BLOCK;
+  shape.gpu = gpuChannels(shape.intermediate, aneUnits, channelUnit(shape.prism));
   shape.ane = shape.intermediate - shape.gpu;
   shape.downSegments = segments(shape.ane);
   return shape;
@@ -234,6 +286,8 @@ template <class MakeBuffer, class MakeSurface>
 AneFfn::Memory AneFfn::allocate(const Shape &shape, MakeBuffer &&buffer, MakeSurface &&surface) {
   const uint32_t inputSegments = shape.hidden / kSegment;
   Memory memory;
+  if (shape.prism)
+    memory.prismInput = buffer(uint64_t{kMaximumRows} * shape.hidden * sizeof(uint16_t), "ane ffn prism input");
   memory.signs = buffer(ANE_FFN_INTERMEDIATE_BLOCK * sizeof(float), "ane ffn signs");
   memory.rowScales = buffer(uint64_t{shape.layers} * (2 * shape.ane + shape.hidden) * sizeof(_Float16),
                             "ane ffn row scales");
@@ -355,7 +409,7 @@ std::string AneFfn::function(const Shape &shape, std::span<const Input> inputs, 
     f16(p + "s", channels, rows, "mul(x = " + sum(p + "m", inputSegments, channels) + ", y = s" + p + "_t)");
   }
   const std::string c = std::to_string(channels), r = std::to_string(rows),
-                    block = std::to_string(ANE_FFN_INTERMEDIATE_BLOCK);
+                    block = std::to_string(shape.rotationBlock);
   // silu(g) = g/2 (1 + tanh(g/2)): through the ANE's sigmoid, the split of
   // layers whose gate pre-activations are about 0.1 differed from the GPU
   // alone by 6.5% RMS, against 1.6% at about 1 (ane-ffn split's affine Q4
@@ -373,7 +427,7 @@ std::string AneFfn::function(const Shape &shape, std::span<const Input> inputs, 
        ", 1, 1]>(BLOBFILE(path = string(\"@model_path/weights.bin\"), offset = uint64(" +
        std::to_string(ane::kConstantOffset) + ")))]");
   line("tensor<fp16, [1, " + c + ", 1, " + r + "]> hr4 = conv(dilations = tensor<int32, [2]>([1, 1]), groups = int32(" +
-       std::to_string(channels / ANE_FFN_INTERMEDIATE_BLOCK) +
+       std::to_string(channels / shape.rotationBlock) +
        "), pad = tensor<int32, [4]>([0, 0, 0, 0]), pad_type = string(\"valid\"), strides = tensor<int32, [2]>([1, "
        "1]), weight = rotation, x = h4)");
   f16("hr", channels, rows, "reshape(x = hr4, shape = tensor<int32, [4]>(" + dimensions(channels, rows) + "))");
@@ -432,7 +486,11 @@ AneFfn::AneFfn(metal::MetalBackend &backend, std::span<const SwiGluProjections> 
 
   const std::vector<Input> inputs = programInputs(shape_, memory_);
   program_ = std::make_unique<ane::Program>(program(shape_, inputs, memory_.partial, functionRows),
-                                            rotationBlob(shape_.ane, signs),
+                                            shape_.prism
+                                                ? prismRotationBlob(shape_.gpu, shape_.ane, signs,
+                                                                    static_cast<const int8_t *>(
+                                                                        layers.front().down->rotation.signs.contents()))
+                                                : rotationBlob(shape_.ane, signs),
                                             ane::Program::Limits{kProgramLimit, std::move(interrupted)});
   for (const uint32_t rows : functionRows) {
     evaluations_.emplace_back().rows = rows;
@@ -603,7 +661,14 @@ void AneFfn::encode(metal::CommandGraph &graph, uint32_t layer, const PrefillFfn
   const auto index = static_cast<uint32_t>(found - evaluations_.begin());
   // Each command stages layer 0's weights, then each layer the next one's.
   if (!layer) addWeights(graph, 0, 0);
-  graph.add("ane_ffn_rotate", {ffn.normalized, memory_.signs, memory_.rotated, memory_.tokenScale.buffer},
+  // Prism-rotated gate and up read H (D x) (InputRotation): so does the ANE.
+  if (shape_.prism)
+    graph.add("gguf_rotate", {ffn.normalized, current.gate.rotation.signs, memory_.prismInput},
+              GgufRotationParams{shape_.hidden}, {shape_.hidden / GGUF_ROTATION_BLOCK, rows, 1},
+              {GGUF_ROTATION_THREADS, 1, 1});
+  graph.add("ane_ffn_rotate",
+            {shape_.prism ? memory_.prismInput : ffn.normalized, memory_.signs, memory_.rotated,
+             memory_.tokenScale.buffer},
             AneFfnRotateParams{shape_.hidden}, {rows, 1, 1}, {ANE_FFN_ROTATE_THREADS, 1, 1});
   for (uint32_t k = 0; k < memory_.inputs.size(); ++k)
     graph.add("ane_ffn_pack", {memory_.rotated, memory_.inputs[k].buffer},

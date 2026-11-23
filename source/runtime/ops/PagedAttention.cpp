@@ -1,6 +1,7 @@
 // Modified for JustFit: product identity and integration.
 #include "ops/VerifyShape.hpp"
 #include "ops/PagedAttention.hpp"
+#include "model/StateLayout.hpp"
 
 #include "metal/abi/RoPE.h"
 #include "ops/BufferExtent.hpp"
@@ -168,7 +169,9 @@ VerifyAttentionPlan PagedAttention::verifyPlan(
     splits = std::max(splits, laneSplits[lane]);
   }
   return {lanes, laneSplits, splits,
-          verifyWorkspaceBound(lanes, queryHeads, layout),
+          model::compactGdnEnabled()
+              ? attentionWorkspace(uint64_t{lanes} * activeVerifyRows() * splits * queryHeads, layout.headDimension)
+              : verifyWorkspaceBound(lanes, queryHeads, layout),
           layout.format == kv::Format::TQ4 ? "verify_attention_tq4_mpp_split" :
           layout.format == kv::Format::BFloat16
               ? pipeline(kernel, "verify_attention_bf16_split",

@@ -4,21 +4,21 @@
     <img src="docs/assets/justfit-banner.svg" alt="JustFit — long-context LLM serving on Apple silicon" width="100%">
   </picture>
 
-  [![Version](https://img.shields.io/badge/version-2.6.0-087f78)](CHANGELOG.md)
+  [![Version](https://img.shields.io/badge/version-2.7.0-087f78)](CHANGELOG.md)
   [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-246a96)](LICENSE)
   [![Apple silicon](https://img.shields.io/badge/platform-Apple%20silicon-526b81)](#install)
 </div>
 
-# JustFit 2.6.0
+# JustFit 2.7.0
 
 JustFit serves a 27B language-and-vision model (Qwen3.8-27B) on Apple silicon
-Macs with 24 GB of unified memory. The `justfit` command and everything it
+Macs with 24 GB of unified memory, and Bonsai 2 27B on 16 GB Macs. The `justfit` command and everything it
 starts are native (Rust, C++/Metal, Swift); no Python runs at inference time.
 
 ## Install
 
 ```bash
-python3 -m venv ~/.justfit && ~/.justfit/bin/pip install justfit-llm==2.6.0
+python3 -m venv ~/.justfit && ~/.justfit/bin/pip install justfit-llm==2.7.0
 ~/.justfit/bin/justfit doctor
 ~/.justfit/bin/justfit serve
 ```
@@ -31,12 +31,52 @@ pinned, hash-checked index. Later starts reuse them.
 
 Requirements: macOS 27.0 or later on Apple silicon; presets for M4 Pro, M5 Pro
 and M6 (`--node m4|m5|m6`, chosen from the chip; at least 24 GB of memory).
+On a 16 GB M6, `--node m6-16` (chosen automatically) serves Bonsai 2 27B
+(`prism-ml/Ternary-Bonsai-2-27B-gguf`) in a 12.1 GiB budget with up to
+221,169 tokens of context; the other chips have no 16 GB preset.
 About 22 GB of disk for the model, draft and ANE programs, plus the SSD cache
 (64 GB quota by default; `--max-cache-disk` changes it, 0 turns it off).
-`--no-ane-vision` uses GPU vision and skips the ANE download. Precompiled ANE
-programs are published for macOS 27.2.1 (build 26B131); on other macOS builds
-the first `justfit serve` compiles them on this Mac, which took 30 minutes to
-over an hour in our tests, once (vision runs on the GPU meanwhile).
+`--no-ane-vision` uses GPU vision and skips the ANE download; `--language-only`
+serves text only. Precompiled ANE programs are published for macOS 27.2.1
+(build 26B131); on other macOS builds images run on the GPU, and
+`--ane-compile` compiles the ANE programs on this Mac instead (30 minutes to
+over an hour of background work in our tests, once; vision stays on the GPU
+meanwhile). `--disable-ane` is separate: it keeps the text prefill FFN on the
+GPU.
+
+## Use it with your tools
+
+`justfit serve` speaks the OpenAI (Chat Completions, Responses), Anthropic
+(Messages) and Ollama APIs on one port, so most clients only need its address:
+
+```bash
+justfit launch claude          # Claude Code on the local model
+justfit launch codex           # Codex CLI on the local model
+OLLAMA_HOST=http://127.0.0.1:8000 ollama run mlx-community/Qwen3.8-27B-4bit
+```
+
+Other clients (Open WebUI, Continue, Cline, Jan, …) use
+`http://127.0.0.1:8000/v1` as an OpenAI-compatible endpoint, or the same
+address as an Ollama server. Append `:instant` to the model name to answer
+without thinking. See [docs/clients.md](docs/clients.md) for
+per-client settings and what a local server does with hosted tools such as
+web search.
+
+## New in 2.7.0
+
+- 16 GB Macs: `--node m6-16` serves Bonsai 2 27B in a 12.1 GiB budget with up
+  to 221,169 tokens of context and vision.
+- GDN state compression based on LeapQuant: about 490–500 MiB less peak memory
+  with two requests on M5 Pro and M6.
+- TQ4 KV cache keeps the first and the most recent pages in BF16 and stores
+  norm-corrected 4-bit codes for the rest.
+- Draft trees also serve requests with repetition, presence or frequency
+  penalties and JSON-schema output.
+- M4 Pro runs part of the text prefill on the Neural Engine again: time to
+  first token on a 16K prompt is 29% shorter than in 2.6.0.
+
+Numbers and limits are in the [2.7.0 release notes](.github/release-notes-2.7.0.md)
+and the [changelog](CHANGELOG.md).
 
 ## What changed since 2.3.1
 
@@ -49,8 +89,9 @@ over an hour in our tests, once (vision runs on the GPU meanwhile).
   the `incoai/Qwen3.8-27B-Splash` model pack.
 - Draft-tree decode: the draft proposes a small tree of continuations and the
   model checks the whole tree in one pass. It applies to greedy requests on
-  all three presets and to sampled requests on M5 Pro and M6, not to
-  grammar-constrained (JSON schema) requests. On SPEED-Bench with greedy
+  all presets and to sampled requests on M5 Pro and M6, including requests
+  with repetition, presence or frequency penalties and JSON-schema output
+  (since 2.7). On SPEED-Bench with greedy
   decoding (512 output tokens) decode is 4-14% faster than verifying a single
   draft chain with 1K-token prompts, and 4-7% faster with 16K-token prompts,
   depending on the chip.
@@ -69,10 +110,10 @@ over an hour in our tests, once (vision runs on the GPU meanwhile).
 
 The binaries are signed with a Developer ID; they are not notarized.
 
-With greedy decoding, tree verification almost always gives the same text as
-verifying a single draft chain: in the SPEED-Bench runs above, every task
-matched on two chips and one of sixteen tasks differed on the third. Sampled
-requests keep the same distribution. A multi-turn request that resumes a kept
+With greedy decoding in 2.6.0, tree verification almost always gave the same
+text as verifying a single draft chain. Since 2.7.0, with GDN compression on,
+the two no longer give byte-identical text; answers on our math set match or
+improve. Sampled requests keep the same distribution. A multi-turn request that resumes a kept
 state can likewise differ slightly from a full recompute.
 
 ## Two 160K requests on a MacBook
@@ -84,9 +125,10 @@ decides whether both requests fit.
 
 On Macs without a display attached (our M5 Pro and M6 test machines) this
 workload completed in every run of this release. On a 24 GB M4 Pro MacBook
-with macOS 27.2.1 it is at the edge: of five runs, one completed, in two
-JustFit paused one request near the end to stay within memory, and in two,
-both with the display on, macOS stopped the server. With the display on,
+with macOS 27.2.1 it stays close to the edge: it completed in our 2.7.0 run,
+while with 2.6.0, of five runs, one completed, in two JustFit paused one
+request near the end to stay within memory, and in two, both with the display
+on, macOS stopped the server. With the display on,
 macOS 27 wires GPU memory again each time the screen redraws; we measured
 about 0.45 GB for a few seconds every minute from the lock screen clock, and
 about 0.7 GB held by a moving (Aerial) wallpaper.
@@ -98,15 +140,17 @@ affected, and shorter pairs leave more room.
 
 ## Source, results and paper
 
-This repository is the complete 2.6.0 source. `package-manifest.json` is the
+This repository is the complete 2.7.0 source. `package-manifest.json` is the
 published wheel's file list with SHA-256 pins; every source file here matches
 it (this README adds this section to the packaged one). `justfit build`
 rebuilds the native runtime from it (Rust/Cargo and Apple's Metal tools
 required).
 JustFit derives from Splash 1.3.0; see LICENSE, NOTICE and ORIGIN.json.
 
-- 16K speed (SPEED-Bench, eight tasks, 512 output tokens), 2.6.0 against the
-  published v2 measurements: prefill 133.9 / 511.5 / 457.5 tok/s
+- 2.7.0 against 2.6.0 is measured in the
+  [release notes](.github/release-notes-2.7.0.md). Earlier baseline, 16K speed
+  (SPEED-Bench, eight tasks, 512 output tokens), 2.6.0 against the published
+  v2 measurements: prefill 133.9 / 511.5 / 457.5 tok/s
   (−4.6% / +6.7% / +1.9%) and decode 48.3 / 59.5 / 38.5 tok/s
   (+3.8% / +7.3% / +6.6%) on M4 Pro / M5 Pro / M6;
   [protocol and all rows](docs/RESULTS.md).

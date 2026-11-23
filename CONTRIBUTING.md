@@ -7,9 +7,8 @@ cd rust/frontend && cargo test --release --no-fail-fast
 justfit build --project <workspace>   # native runtime; needs Apple's Metal tools
 ```
 
-On macOS 27 with Xcode, `cargo test` in 2.6.0 passes 198 tests; nine contract
-tests still assert pre-2.6 defaults and fixtures and fail. They are tracked for
-2.6.1.
+On macOS 27 with Xcode, `cargo test` in 2.7.0 passes 216 tests; ten contract
+tests still assert pre-2.6 defaults and fixtures and fail.
 
 When reporting a reproducible issue, include the chip, memory size, macOS
 build, the `justfit --version` output, the model revision and the command you

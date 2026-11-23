@@ -1,4 +1,6 @@
 // Modified for JustFit: product identity and integration.
+#define JUSTFIT_PREFILL_RING_OWNER 1
+#define justfit_tq4_store_row justfit_tq4_prefill_ring_store_row
 #include "metal/kernels/common/tq4_store_row.h"
 
 kernel void prefill_attention_tq4_store(

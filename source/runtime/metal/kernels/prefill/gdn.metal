@@ -324,3 +324,9 @@ GDN_GATE_PREFILL_ENTRY(prefill_gdn_gate_f32, 16, 48, 128, 10240, 16640, float)
 GDN_GATE_PREFILL_ENTRY(prefill_gdn_gate_vh32_f32, 16, 32, 128, 8192, 12544,
                        float)
 #undef GDN_GATE_PREFILL_ENTRY
+
+// FP32 recurrent output aliases its input. Each scan group owns disjoint
+// state coordinates, loaded before its final store; carry copies run later.
+kernel void gdn_prefill_carry_copy(device const uint *source [[buffer(0)]],device uint *dest [[buffer(1)]],constant uint &words [[buffer(2)]],uint i [[thread_position_in_grid]]) {
+ if(i<words)dest[i]=source[i];
+}

@@ -119,14 +119,16 @@ kernel void ane_ffn_pack(device const half *rotated [[buffer(0)]],
 // (metal/abi/QuantFormat.h), as kernels/common/gguf_staged.h decodes them.
 template <class F>
 inline void ane_ffn_gguf_values(thread float (&value)[4], device uchar *plane0, device uchar *plane1,
-                                device uchar *meta, uint groups, uint row, uint input) {
+                                device uchar *meta, uint groups, uint row, uint input, threadgroup half2 *table) {
   const uint group = input >> 5, h = (input >> 4) & 1;
   const ushort c = (input >> 2) & 3;
   const ulong unit = quant_tile_index(row, group, groups);
   const typename F::Payload w = F::load(plane0 + unit * F::P0, plane1 + unit * F::P1);
   const typename F::Meta header =
       F::loadMeta(meta + quant_tile_index(row, group / F::MetaGroups, groups / F::MetaGroups) * F::MetaBytes);
-  const typename F::Chunk q = F::chunk(w, c);
+  typename F::Chunk q;
+  if constexpr (quant_meta_chunk<F>::value) q = F::chunk(w, c, header, ushort(group % F::MetaGroups), table);
+  else q = F::chunk(w, c);
   QuantCoef k;
   if constexpr (F::ScaleInChunk) k = F::coef(header, F::chunk(w, 0));
   else k = F::coef(header, ushort(group % F::MetaGroups));
@@ -158,15 +160,15 @@ inline void ane_ffn_gguf_values(thread float (&value)[4], device uchar *plane0, 
 // meta in format F (groups = inputs / 32).
 struct AneFfnAffine {
   static void values(thread float (&value)[4], device uchar *a, device uchar *b, device uchar *c, uint groups, uint row,
-                     uint input) {
+                     uint input, threadgroup half2 *) {
     ane_ffn_q4_values(value, a, (device const bfloat *)b, (device const bfloat *)c, groups, row, input);
   }
 };
 template <class F>
 struct AneFfnGguf {
   static void values(thread float (&value)[4], device uchar *a, device uchar *b, device uchar *c, uint groups, uint row,
-                     uint input) {
-    ane_ffn_gguf_values<F>(value, a, b, c, groups, row, input);
+                     uint input, threadgroup half2 *table) {
+    ane_ffn_gguf_values<F>(value, a, b, c, groups, row, input, table);
   }
 };
 
@@ -176,12 +178,13 @@ struct AneFfnGguf {
 template <uint K, class Source>
 inline void ane_ffn_weight_rows(device uchar *a, device uchar *b, device uchar *c, device const half *row_scale,
                                 device char *output, device half *scale, device const float *sign,
-                                constant AneFfnWeightParams &params, uint2 tile, uint simd_group, uint lane) {
+                                constant AneFfnWeightParams &params, uint2 tile, uint simd_group, uint lane,
+                                threadgroup half2 *table = nullptr) {
   const uint row = tile.x * ANE_FFN_WEIGHT_ROWS + simd_group, block = tile.y * K * ANE_FFN_ROTATION_UNIT;
   float value[K][4];
   for (uint k = 0; k < K; ++k)
     Source::values(value[k], a, b, c, params.groups, params.row + row,
-                   params.input + block + k * ANE_FFN_ROTATION_UNIT + lane * 4);
+                   params.input + block + k * ANE_FFN_ROTATION_UNIT + lane * 4, table);
   ane_ffn_rotate_block<K>(value, lane, sign);
   const float inverse = ANE_FFN_INT8_UNIT / float(row_scale[row]);
   for (uint k = 0; k < K; ++k)
@@ -197,14 +200,14 @@ inline void ane_ffn_weight_rows(device uchar *a, device uchar *b, device uchar *
 template <uint K, class Source>
 inline void ane_ffn_row_scales(device uchar *a, device uchar *b, device uchar *c, device half *row_scale,
                                device const float *sign, constant AneFfnWeightParams &params, uint tile,
-                               uint simd_group, uint lane) {
+                               uint simd_group, uint lane, threadgroup half2 *table = nullptr) {
   const uint row = tile * ANE_FFN_WEIGHT_ROWS + simd_group;
   float peak = 0.0f;
   for (uint block = 0; block < params.width; block += K * ANE_FFN_ROTATION_UNIT) {
     float value[K][4];
     for (uint k = 0; k < K; ++k)
       Source::values(value[k], a, b, c, params.groups, params.row + row,
-                     params.input + block + k * ANE_FFN_ROTATION_UNIT + lane * 4);
+                     params.input + block + k * ANE_FFN_ROTATION_UNIT + lane * 4, table);
     ane_ffn_rotate_block<K>(value, lane, sign);
     for (uint k = 0; k < K; ++k)
       for (uint e = 0; e < 4; ++e) peak = max(peak, fabs(value[k][e]));
@@ -229,9 +232,12 @@ kernel void ane_ffn_weights_gguf(device uchar *a [[buffer(0)]], device uchar *b 
     constant AneFfnWeightParams &params [[buffer(7)]],
     uint2 tile [[threadgroup_position_in_grid]], uint simd_group [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
+  // PTQ1_0's base-3 bytes decode through the threadgroup pair table (quant_has_table).
+  threadgroup half2 table[kQuantPairTableEntries];
   quant_format_switch(params.format, [&](auto format) {
+    quant_pair_table<decltype(format)>(table, simd_group * 32 + lane, ANE_FFN_WEIGHT_THREADS);
     ane_ffn_weight_rows<K, AneFfnGguf<decltype(format)>>(a, b, c, row_scale, output, scale, sign, params, tile,
-                                                         simd_group, lane);
+                                                         simd_group, lane, table);
   });
 }
 template <uint K>
@@ -246,8 +252,11 @@ kernel void ane_ffn_row_scale_gguf(device uchar *a [[buffer(0)]], device uchar *
     device uchar *c [[buffer(2)]], device half *row_scale [[buffer(3)]], device const float *sign [[buffer(4)]],
     constant AneFfnWeightParams &params [[buffer(5)]], uint tile [[threadgroup_position_in_grid]],
     uint simd_group [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup half2 table[kQuantPairTableEntries];
   quant_format_switch(params.format, [&](auto format) {
-    ane_ffn_row_scales<K, AneFfnGguf<decltype(format)>>(a, b, c, row_scale, sign, params, tile, simd_group, lane);
+    quant_pair_table<decltype(format)>(table, simd_group * 32 + lane, ANE_FFN_WEIGHT_THREADS);
+    ane_ffn_row_scales<K, AneFfnGguf<decltype(format)>>(a, b, c, row_scale, sign, params, tile, simd_group, lane,
+                                                        table);
   });
 }
 

@@ -1,7 +1,10 @@
 // Modified for JustFit: product identity and integration.
 #include "model/QwenState.hpp"
+#include "model/CompactGdnSeed.hpp"
+#include "ops/GDN.hpp"
 
 #include <cstring>
+#include <cstdio>
 #include <algorithm>
 #include <stdexcept>
 #include <string>
@@ -99,6 +102,18 @@ private:
 };
 
 } // namespace
+
+QwenCommitScratch::QwenCommitScratch(metal::MetalBackend &backend,
+    std::shared_ptr<StateAllocationTracker> tracker, uint64_t bytes)
+    : buffer(backend.allocateBuffer(bytes, metal::BufferStorage::Shared,
+                                    "qwen-commit-convolution")),
+      tracker_(std::move(tracker)) {
+  tracker_->bytes.fetch_add(buffer.allocatedBytes(), std::memory_order_relaxed);
+}
+
+QwenCommitScratch::~QwenCommitScratch() {
+  tracker_->bytes.fetch_sub(buffer.allocatedBytes(), std::memory_order_relaxed);
+}
 
 QwenGdnCell::QwenGdnCell(metal::MetalBackend &backend,
                          std::shared_ptr<StateAllocationTracker> tracker,
@@ -214,13 +229,38 @@ QwenStateStorage::QwenStateStorage(metal::MetalBackend &backend,
     throw std::invalid_argument("Qwen state allocation admission is required");
   if (!layout_.valid())
     throw std::invalid_argument("Qwen composite state layout is invalid");
+  if (compactGdnEnabled()) {
+    const auto &shape = layout_.target;
+    if (shape.layers != 48 || shape.recurrentGroups != 48 ||
+        shape.recurrentRows != 128 || shape.recurrentColumns != 128 ||
+        shape.convolutionChannels != 10240)
+      throw std::invalid_argument("compact GDN requires 27B, 48 layers and 48x128x128 recurrent state");
+    constexpr uint64_t inputBytes = 48ull * 128 * 128 * sizeof(float);
+    constexpr uint64_t outputBytes = 8ull * 1024 * 1024;
+    metal::MetalBuffer input, output, seed;
+    auto admission = admitAllocation_(inputBytes + outputBytes + sizeof(kCompactGdnSeed), [&] {
+      input = backend_.allocateBuffer(inputBytes, metal::BufferStorage::Shared, "compact GDN input");
+      output = backend_.allocateBuffer(outputBytes, metal::BufferStorage::Shared, "compact GDN output");
+      seed = backend_.allocateBuffer(sizeof(kCompactGdnSeed), metal::BufferStorage::Shared, "compact GDN seed");
+    });
+    if (!admission) throw std::runtime_error("compact GDN scratch admission failed");
+    std::memcpy(seed.contents(), kCompactGdnSeed.data(), sizeof(kCompactGdnSeed));
+    ops::GDN::setCompactResources(backend_, std::move(input), std::move(output), std::move(seed));
+    std::fprintf(stderr, "JUSTFIT_COMPACT_GDN active recurrent_bytes=%llu\n",
+                 static_cast<unsigned long long>(shape.recurrentBytes()));
+  }
   file_ = std::move(file);
 }
 
 QwenStateStorage::~QwenStateStorage() {
+  for(auto &assigned:lanes_) {
+    assigned.commitScratch = {};
+    assigned.scratch.reset();
+  }
   pool_->open = false;
   pool_->cells.clear();
   pool_->rings.clear();
+  pool_->scratch.clear();
 }
 
 const QwenLaneMetadata &QwenStateStorage::metadata(uint32_t index) const {
@@ -236,7 +276,7 @@ const GdnParityBuffers &QwenStateStorage::current(uint32_t index) const {
 const GdnParityBuffers &QwenStateStorage::next(uint32_t index) const {
   const Lane &assigned = lane(index);
   requireAssigned(assigned);
-  return assigned.cells.gdn[assigned.metadata.activeParity ^ 1]->buffers();
+  return assigned.commitScratch;
 }
 
 const std::vector<DFlashDraftRingLayer> &
@@ -256,12 +296,30 @@ QwenStateStorage::tryActivateLane(uint32_t index, uint64_t requestId, uint64_t e
     throw std::logic_error("Qwen lane is already assigned");
   }
   Buffers buffers;
+  std::shared_ptr<QwenCommitScratch> scratch;
+  const bool pooledScratch = !pool_->scratch.empty();
+  auto allocate = [&] {
+    if (allocateExtra) allocateExtra();
+    if (!pooledScratch)
+      scratch = std::make_shared<QwenCommitScratch>(
+          backend_, allocations_, layout_.commitScratchBytes());
+  };
   if (auto admission = acquire(CompositeStateLayout::kLaneGdnCells,
                                "qwen-state-lane-" + std::to_string(index),
-                               buffers, extraBytes, allocateExtra);
+                               buffers, extraBytes + (pooledScratch ? 0 : layout_.commitScratchBytes()), allocate);
       !admission)
     return admission;
+  if (pooledScratch) {
+    scratch = std::move(pool_->scratch.back());
+    pool_->scratch.pop_back();
+  }
   current.cells = std::move(buffers);
+  current.scratch = std::move(scratch);
+  current.commitScratch.stateBase = current.scratch->buffer;
+  current.commitScratch.convolutionLayers.resize(layout_.target.layers);
+  for(uint32_t layer=0;layer<layout_.target.layers;++layer)
+    current.commitScratch.convolutionLayers[layer]=backend_.view(current.commitScratch.stateBase,uint64_t{layer}*layout_.target.convolutionLayerBytes(),layout_.target.convolutionLayerBytes());
+  current.commitScratch.recurrentLayers=current.cells.gdn[0]->buffers().recurrentLayers;
   current.metadata = {requestId, 0, {}};
   return {};
 }
@@ -272,8 +330,9 @@ void QwenStateStorage::releaseLane(uint32_t index, uint64_t requestId) {
   if (!requestId || current.metadata.requestId != requestId) {
     throw std::logic_error("Qwen lane owner mismatch");
   }
-  // Parity one first, so the next activation pops parity zero first and a
-  // reactivated lane gets its previous buffers back in the same order.
+  current.commitScratch = {};
+  pool_->scratch.push_back(std::move(current.scratch));
+  // Return the only full cell; convolution scratch has no cache identity.
   for (uint32_t parity = current.cells.gdn.size(); parity > 0;) {
     --parity;
     pool_->cells.push_back(std::move(current.cells.gdn[parity]));
@@ -291,7 +350,8 @@ std::shared_ptr<const QwenCompositeState> QwenStateStorage::park(uint32_t index,
   }
   validateLengths(current.metadata.lengths, false);
   const uint32_t parity = current.metadata.activeParity;
-  pool_->cells.push_back(std::move(current.cells.gdn[parity ^ 1]));
+  current.commitScratch = {};
+  pool_->scratch.push_back(std::move(current.scratch));
   QwenCachedBuffers buffers{std::move(current.cells.gdn[parity]),
                             std::move(current.cells.draft)};
   std::shared_ptr<QwenCompositeState> state(new QwenCompositeState(
@@ -306,7 +366,36 @@ void QwenStateStorage::clearForColdStart(uint32_t index) {
   requireAssigned(target);
   if (target.metadata.lengths != QwenLogicalLengths{})
     throw std::logic_error("a cold start begins at logical length zero");
-  clear(current(index).stateBase, "cold-start GDN state");
+  const auto &base=current(index).stateBase;
+  clear(base, "cold-start GDN state");
+  if (tq4WindowEnabled()) {
+    auto *tags=static_cast<std::byte *>(base.contents()) +
+               layout_.target.tq4WindowOffset() + JUSTFIT_TQ4_WINDOW_DATA_BYTES;
+    std::memset(tags, 0xff, JUSTFIT_TQ4_WINDOW_TAGS * sizeof(uint32_t));
+  }
+}
+
+std::shared_ptr<const QwenGdnCell>
+QwenStateStorage::checkpointGdn(uint32_t index) {
+  const auto &source = current(index);
+  std::shared_ptr<QwenGdnCell> saved;
+  if (!admitAllocation_(layout_.target.cellBytes(), [&] {
+        saved = std::shared_ptr<QwenGdnCell>(new QwenGdnCell(
+            backend_, allocations_, layout_.target, "qwen-prefill-rollback"));
+      })) return {};
+  copyExact(saved->buffers().stateBase, source.stateBase, "prefill GDN checkpoint");
+  return saved;
+}
+
+void QwenStateStorage::restoreGdn(uint32_t index, const QwenGdnCell &saved) {
+  copyExact(current(index).stateBase, saved.buffers().stateBase,
+            "prefill GDN rollback");
+}
+
+uint64_t QwenStateStorage::idleScratchBytes() const noexcept {
+  uint64_t bytes = 0;
+  for (const auto &scratch : pool_->scratch) bytes += scratch->buffer.allocatedBytes();
+  return bytes;
 }
 
 void QwenStateStorage::clearDraftRings(uint32_t index) {
@@ -324,6 +413,8 @@ uint64_t QwenStateStorage::releaseOneIdle(bool keepLane) noexcept {
     pool_->cells.pop_back();
   else if (idleRings() > (keepLane ? 1U : 0U))
     pool_->rings.pop_back();
+  else if (pool_->scratch.size() > (keepLane ? 1U : 0U))
+    pool_->scratch.pop_back();
   else
     return 0;
   const uint64_t after = backend_.memoryStats().allocatedBytes;
@@ -345,6 +436,9 @@ uint64_t QwenStateStorage::missingBytes(uint32_t cells) const noexcept {
 }
 
 uint32_t QwenStateStorage::statesToActivate() const noexcept {
+  // A cached state returns a cell and ring, not convolution scratch. Do not
+  // evict it claiming allocation-free activation while growth is paused.
+  if (pool_->scratch.empty()) return 0;
   constexpr uint32_t laneCells = CompositeStateLayout::kLaneGdnCells;
   const uint32_t cells = laneCells - std::min(idleCells(), laneCells);
   const uint32_t rings = idleRings() ? 0 : 1;
@@ -362,7 +456,8 @@ void QwenStateStorage::updateLengths(uint32_t index,
 void QwenStateStorage::swapParity(uint32_t index) {
   Lane &current = lane(index);
   requireAssigned(current);
-  current.metadata.activeParity ^= 1;
+  // Commit already updated the full FP32 cell and copied its convolution.
+  current.metadata.activeParity = 0;
 }
 
 std::shared_ptr<const QwenCompositeState>

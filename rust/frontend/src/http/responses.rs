@@ -494,6 +494,19 @@ pub(super) fn stream_fixture(body: &Value) -> Result<Value> {
 
 pub(super) async fn post(
     s: Service,
+    body: Value,
+    permit: Arc<OwnedSemaphorePermit>,
+    body_permit: super::BodyPermit,
+    received: std::time::Instant,
+) -> Result<Response> {
+    let ignored = crate::hosted_tools::ignored(&body["tools"], crate::hosted_tools::openai_hosted);
+    let mut response = post_inner(s, body, permit, body_permit, received).await?;
+    crate::hosted_tools::disclose(&mut response, &ignored);
+    Ok(response)
+}
+
+async fn post_inner(
+    s: Service,
     mut body: Value,
     permit: Arc<OwnedSemaphorePermit>,
     mut _body_permit: super::BodyPermit,

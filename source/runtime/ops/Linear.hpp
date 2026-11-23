@@ -110,6 +110,10 @@ struct LinearConfig final {
   // least two); all other tiles use one.
   uint32_t splits = 1;
   static constexpr uint32_t kMaximumSplits = 8;
+  // A GgufStaged decode of rotated PQ2_0 or PTQ1_0 runs its int8-activation
+  // tiles (LinearGguf.cpp, kernels/shared/gguf_linear.metal gguf_decode_int8_*)
+  // at the same rows and splits; Linear::ggufBaseline sets it.
+  bool decodeInt8 = false;
   [[nodiscard]] constexpr bool validSplits() const noexcept {
     return splits && splits <= kMaximumSplits && !(splits & (splits - 1));
   }
@@ -347,6 +351,8 @@ private:
   void addGguf(metal::CommandGraph &graph, const LinearBuffers &buffers,
                const Projection &projection, const LinearPlan &plan,
                const Projection *gate) const;
+  void addGgufA8(metal::CommandGraph &graph, const LinearBuffers &buffers, const Projection &projection,
+                 const LinearPlan &plan, const Projection *gate) const;
   void addGgufStaged(metal::CommandGraph &graph, const LinearBuffers &buffers,
                      const Projection &projection, const LinearPlan &plan,
                      const Projection *gate) const;

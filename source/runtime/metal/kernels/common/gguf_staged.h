@@ -20,7 +20,8 @@ inline void dequant32(typename F::Payload w, typename F::Meta meta, ushort j, th
   if constexpr (F::ScaleInChunk) k = F::coef(meta, F::chunk(w, 0)); else k = F::coef(meta, j);
 #pragma unroll
   for (ushort c = 0; c < 4; ++c) {
-    const typename F::Chunk q = F::chunk(w, c);
+    typename F::Chunk q;
+    if constexpr (quant_meta_chunk<F>::value) q = F::chunk(w, c, meta, j, tl); else q = F::chunk(w, c);
     half4 lo, hi;
     if constexpr (F::Kind == QuantLinear) {
       const uint4 p = F::codes(q);

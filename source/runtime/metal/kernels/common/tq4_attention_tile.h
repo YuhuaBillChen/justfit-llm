@@ -72,6 +72,28 @@ inline void justfit_tq4_inverse_page(JustFitTQ4PageView layer_page,
   }
 }
 
+// A page inside the full-precision window, when its shadow slot still holds
+// it: the tile is the BF16 keys or values themselves.
+template <bool ValueTensor>
+inline void justfit_tq4_window_page(device const JustFitKvPage *page_table, JustFitKvLayer kv,
+                                   JustFitTQ4PageView layer_page, uint page, uint last_page,
+                                   uint kv_head, threadgroup bfloat *page_values,
+                                   uint simd_group, uint simd_lane) {
+  const bool hot = JUSTFIT_TQ4_WINDOW_PAGES != 0 &&
+                   (page == 0 || page + JUSTFIT_TQ4_WINDOW_PAGES > last_page);
+  if (hot) {
+    const JustFitTQ4Shadow shadow = justfit_tq4_shadow(page_table, kv, page, ValueTensor, kv_head);
+    if (shadow.data && *shadow.tag == page) {
+      const uint cell = simd_group * 32 + simd_lane;
+#pragma unroll
+      for (uint i = 0; i < 32; ++i)
+        page_values[cell * 32 + i] = shadow.data[cell * 32 + i];
+      return;
+    }
+  }
+  justfit_tq4_inverse_page<ValueTensor>(layer_page, kv_head, page_values, simd_group, simd_lane);
+}
+
 template <uint QueryHeadsPerKVHead, uint RowsPerTile>
 inline void justfit_tq4_page_softmax(
     threadgroup const float *scores, threadgroup bfloat *probabilities,
@@ -195,8 +217,8 @@ inline void justfit_tq4_attention_direct_tile(
 
   for (uint page = page_begin; page < page_end; ++page) {
     const auto layer_page = justfit_tq4_page(page_table[page], kv);
-    justfit_tq4_inverse_page<false>(layer_page, kv_head, page_values,
-                                   simd_group, simd_lane);
+    justfit_tq4_window_page<false>(page_table, kv, layer_page, page, pages - 1,
+                                  kv_head, page_values, simd_group, simd_lane);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     auto keys = tensor(page_values, dextents<int, 2>{D, N},
                        array<int, 2>{1, D});
@@ -221,8 +243,8 @@ inline void justfit_tq4_attention_direct_tile(
         running[index] *= previous_scale[coordinates[1]];
       }
     }
-    justfit_tq4_inverse_page<true>(layer_page, kv_head, page_values,
-                                  simd_group, simd_lane);
+    justfit_tq4_window_page<true>(page_table, kv, layer_page, page, pages - 1,
+                                 kv_head, page_values, simd_group, simd_lane);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     auto values = tensor(page_values, dextents<int, 2>{N, D},
                          array<int, 2>{1, N});
