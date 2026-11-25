@@ -159,9 +159,9 @@ public:
   diskCandidate(bool duplicate, uint64_t after = 0) const;
   // Oldest unused holder of a disk copy that no state needs: none sits at
   // its block or below. A disk-only one is a leaf.
-  [[nodiscard]] std::optional<CacheEvictionCandidate> unneededCopy() const noexcept {
-    return unneeded_.oldest();
-  }
+  // The optional protected chain is in increasing order of block id.
+  [[nodiscard]] std::optional<CacheEvictionCandidate>
+  unneededCopy(std::span<const uint64_t> protectedChain) const noexcept;
   // The blocks below a block, each after its children, visiting only that
   // subtree; empty when one of them is in transfer or active. Below a
   // resident leaf they are disk-only; below a poisoned block some may be

@@ -898,18 +898,19 @@ void Cache::labelKv(uint64_t block, const std::shared_ptr<KvDiskSlot> &slot) {
   tier_->label(slot, encodeLabel(label));
 }
 
-std::shared_ptr<KvDiskSlot> Cache::acquireDiskSlot(bool inUse) {
+std::shared_ptr<KvDiskSlot> Cache::acquireDiskSlot(
+    bool inUse, std::span<const uint64_t> protectedChain) {
   for (;;) {
     if (auto slot = tier_->acquireSlot())
       return slot;
-    if (!freeDiskSpace(inUse))
+    if (!freeDiskSpace(inUse, protectedChain))
       return {};
   }
 }
 
-bool Cache::freeDiskSpace(bool inUse) {
+bool Cache::freeDiskSpace(bool inUse, std::span<const uint64_t> protectedChain) {
   if (persistent_)
-    return dropUnneededCopy() || dropOldestPoint(inUse);
+    return dropUnneededCopy(protectedChain) || dropOldestPoint(inUse);
   // A redundant copy loses nothing: its data stays in RAM.
   const auto kvDuplicate = kv_.diskCandidate(true);
   const auto stateDuplicate = states_.diskCandidate(true);
@@ -958,8 +959,8 @@ bool Cache::dropOldestPoint(bool inUse) {
   return true;
 }
 
-bool Cache::dropUnneededCopy() {
-  const auto unneeded = kv_.unneededCopy();
+bool Cache::dropUnneededCopy(std::span<const uint64_t> protectedChain) {
+  const auto unneeded = kv_.unneededCopy(protectedChain);
   if (!unneeded)
     return false;
   if (kv_.page(unneeded->id) != KvCache::noPage)
@@ -1087,7 +1088,9 @@ PersistStatus Cache::persist(uint64_t block) {
     // Only a resident block lacks a disk copy.
     if (!restores_.empty() || copies_.size() >= kCopies || !tier_->canDemote())
       return inFlight ? PersistStatus::Started : PersistStatus::Busy;
-    std::shared_ptr<KvDiskSlot> slot = acquireDiskSlot(false);
+    // Earlier batches can have landed before the state pins the chain.
+    // This background write must not take back its own disk copies.
+    std::shared_ptr<KvDiskSlot> slot = acquireDiskSlot(false, chain.blocks);
     // Making room gives up the oldest point, which may be this one: it does
     // not fit then. Otherwise its chain stays whole, as a state needs it.
     if (!slot || !states_.ordinary(block))
@@ -1101,10 +1104,10 @@ PersistStatus Cache::persist(uint64_t block) {
     copies_.push_back({id, std::move(transfer)});
     inFlight = true;
   }
-  const PersistStatus state = states_.persist(block);
-  if (state == PersistStatus::Durable || state == PersistStatus::Busy)
-    return inFlight ? PersistStatus::Started : state;
-  return state;
+  // The disk state is useful to the next process only with a complete chain.
+  if (inFlight)
+    return PersistStatus::Started;
+  return states_.persist(block);
 }
 
 void Cache::relabelStates() const { states_.relabel(); }

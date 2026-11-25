@@ -583,14 +583,15 @@ private:
   void dropPoisoned();
   // A slot for a new KV copy, replacing older copies while the quota is full;
   // inUse when a state in use needs the copy.
-  [[nodiscard]] std::shared_ptr<KvDiskSlot> acquireDiskSlot(bool inUse);
+  [[nodiscard]] std::shared_ptr<KvDiskSlot>
+  acquireDiskSlot(bool inUse, std::span<const uint64_t> protectedChain = {});
   // Gives up one disk copy for a new copy, in use or not: the oldest
   // redundant one, KV or state, else the oldest that is the only copy, never
   // the KV of a state in RAM. A persistent tier gives up restore points
   // instead (dropOldestPoint). The only copy of a state in use, and the KV
   // it restores through, go only for a copy in use, and after every other.
   // False when the disk holds nothing the new copy may displace.
-  [[nodiscard]] bool freeDiskSpace(bool inUse);
+  [[nodiscard]] bool freeDiskSpace(bool inUse, std::span<const uint64_t> protectedChain = {});
   // In a persistent tier a redundant copy is what the next process takes
   // back, and the unit worth keeping is a restore point, a state and its
   // chain. A copy no state needs goes first (dropUnneededCopy), then the
@@ -599,7 +600,7 @@ private:
   // stays whole while a state needs it. The only copy of a state in use goes
   // only for a copy in use, and last. False when no state copy can go.
   [[nodiscard]] bool dropOldestPoint(bool inUse);
-  [[nodiscard]] bool dropUnneededCopy();
+  [[nodiscard]] bool dropUnneededCopy(std::span<const uint64_t> protectedChain);
   // A persistent tier's label for the block's disk copy.
   void labelKv(uint64_t block, const std::shared_ptr<KvDiskSlot> &slot);
   // Ordinary states below the block sit on exactly one of its branches.

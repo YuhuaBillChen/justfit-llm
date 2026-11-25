@@ -577,6 +577,15 @@ const KvCache::Block &KvCache::block(uint64_t blockId) const {
   return found->second;
 }
 
+std::optional<CacheEvictionCandidate> KvCache::unneededCopy(
+    std::span<const uint64_t> protectedChain) const noexcept {
+  auto candidate = unneeded_.oldest();
+  while (candidate && std::binary_search(protectedChain.begin(), protectedChain.end(),
+                                          candidate->id))
+    candidate = unneeded_.next(*candidate);
+  return candidate;
+}
+
 // Resident leaves wait in one order, disk copies in another: redundant
 // copies of resident blocks, or disk-only blocks without children. The disk
 // copies no state needs wait in a third as well. A block a request uses, one
